@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ML Auto Sender – Autorização</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 40px;
+    max-width: 560px;
+    width: 100%;
+    text-align: center;
+  }
+  .icon { font-size: 56px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin-bottom: 8px; }
+  .sub { color: #8b949e; font-size: 14px; margin-bottom: 28px; }
+  .step {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px 20px;
+    text-align: left;
+    margin-bottom: 16px;
+  }
+  .step-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #8b949e;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .code-box {
+    background: #161b22;
+    border: 2px solid #2ea043;
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-family: 'Consolas', monospace;
+    font-size: 13px;
+    color: #3fb950;
+    word-break: break-all;
+    user-select: all;
+  }
+  .url-box {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-family: 'Consolas', monospace;
+    font-size: 11px;
+    color: #8b949e;
+    word-break: break-all;
+    user-select: all;
+  }
+  .btn {
+    display: inline-block;
+    background: #2ea043;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    margin-top: 8px;
+    transition: background .15s;
+  }
+  .btn:hover { background: #3fb950; }
+  .btn-copy {
+    background: #1f6feb;
+    margin-top: 12px;
+    font-size: 13px;
+    padding: 8px 18px;
+  }
+  .btn-copy:hover { background: #388bfd; }
+  .notice {
+    margin-top: 24px;
+    color: #8b949e;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .error-card { border-color: #da3633; }
+  .error-card h1 { color: #da3633; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="icon" id="icon">⏳</div>
+  <h1 id="title">Verificando autorização…</h1>
+  <p class="sub" id="sub">Aguarde um momento</p>
+  <div id="content"></div>
+</div>
+
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const code   = params.get('code');
+  const error  = params.get('error');
+
+  const icon    = document.getElementById('icon');
+  const title   = document.getElementById('title');
+  const sub     = document.getElementById('sub');
+  const content = document.getElementById('content');
+  const card    = document.getElementById('card');
+
+  if (error) {
+    icon.textContent  = '❌';
+    title.textContent = 'Autorização negada';
+    sub.textContent   = 'Você cancelou ou ocorreu um erro.';
+    card.classList.add('error-card');
+    content.innerHTML = `<div class="step"><div class="step-label">Erro</div><div class="url-box">${error}</div></div>
+      <p class="notice">Feche esta aba e tente novamente no ML Auto Sender.</p>`;
+    return;
+  }
+
+  if (!code) {
+    icon.textContent  = '⚠️';
+    title.textContent = 'Código não encontrado';
+    sub.textContent   = 'Nenhum código de autorização foi recebido.';
+    content.innerHTML = `<p class="notice">Acesse esta página apenas através do fluxo de autorização do ML Auto Sender.</p>`;
+    return;
+  }
+
+  // Sucesso!
+  icon.textContent  = '✅';
+  title.textContent = 'Autorização concluída!';
+  sub.textContent   = 'Copie a URL completa desta página e cole no ML Auto Sender.';
+
+  const fullUrl = window.location.href;
+
+  content.innerHTML = `
+    <div class="step">
+      <div class="step-label">📋 Passo 1 — Copie a URL desta página</div>
+      <div class="url-box" id="fullUrl">${fullUrl}</div>
+      <button class="btn btn-copy" onclick="copyUrl()">📋 Copiar URL completa</button>
+    </div>
+    <div class="step">
+      <div class="step-label">✅ Passo 2 — Cole no ML Auto Sender</div>
+      <p style="font-size:13px;color:#8b949e;line-height:1.6">
+        Volte ao ML Auto Sender, cole a URL no campo que está esperando
+        e clique em <strong style="color:#e6edf3">Confirmar</strong>.
+      </p>
+    </div>
+  `;
+
+  function copyUrl() {
+    navigator.clipboard.writeText(fullUrl).then(() => {
+      const btn = document.querySelector('.btn-copy');
+      btn.textContent = '✔ Copiado!';
+      btn.style.background = '#2ea043';
+      setTimeout(() => {
+        btn.textContent = '📋 Copiar URL completa';
+        btn.style.background = '#1f6feb';
+      }, 2000);
+    });
+  }
+  window.copyUrl = copyUrl;
+
+  // Tentar copiar automaticamente
+  try { navigator.clipboard.writeText(fullUrl); } catch(e) {}
+})();
+</script>
+</body>
+</html>
