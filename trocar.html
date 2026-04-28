@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>ML Auto Sender - Trocar Token</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;
+     min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;
+      padding:32px;max-width:640px;width:100%}
+h2{color:#2ea043;font-size:20px;margin-bottom:6px}
+.sub{color:#8b949e;font-size:13px;margin-bottom:24px}
+label{display:block;font-size:11px;font-weight:700;color:#8b949e;
+      text-transform:uppercase;letter-spacing:1px;margin-bottom:5px}
+input,textarea{width:100%;background:#0d1117;border:1px solid #30363d;
+               border-radius:6px;color:#e6edf3;font-size:13px;
+               padding:10px 12px;margin-bottom:14px;font-family:'Consolas',monospace}
+input:focus,textarea:focus{outline:none;border-color:#1f6feb}
+textarea{height:56px;resize:vertical}
+.btn{display:block;width:100%;padding:12px;border-radius:6px;border:none;
+     font-size:14px;font-weight:700;cursor:pointer;margin-top:4px}
+.btn-blue{background:#1f6feb;color:#fff;margin-bottom:14px}
+.btn-green{background:#2ea043;color:#fff}
+.btn:hover{opacity:.85}
+.sep{border:none;border-top:1px solid #30363d;margin:20px 0}
+.step{display:flex;gap:8px;align-items:flex-start;margin-bottom:10px}
+.num{background:#1f6feb;color:#fff;border-radius:4px;padding:1px 8px;
+     font-size:11px;font-weight:700;flex-shrink:0;margin-top:2px}
+.result{background:#0d1117;border:1px solid #30363d;border-radius:8px;
+        padding:16px;margin-top:20px;display:none}
+.result.ok{border-color:#2ea043}
+.result.err{border-color:#da3633}
+.rtitle{font-weight:700;font-size:14px;margin-bottom:10px}
+.box{background:#0d1117;border:1px solid #2ea043;border-radius:6px;
+     padding:12px;font-family:Consolas,monospace;font-size:11px;color:#3fb950;
+     word-break:break-all;margin-bottom:10px;white-space:pre}
+.copy-btn{background:#1f6feb;color:#fff;border:none;border-radius:4px;
+          padding:8px 18px;cursor:pointer;font-size:13px;font-weight:700}
+.copy-btn:hover{background:#388bfd}
+.warn{color:#d29922;font-size:12px;margin-bottom:14px}
+.hint{color:#8b949e;font-size:11px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>⚡ ML Auto Sender — Trocar Token</h2>
+  <p class="sub">Esta página está hospedada no GitHub Pages e faz a troca diretamente pelo seu browser.</p>
+
+  <div class="step">
+    <span class="num">1</span>
+    <span style="font-size:13px;color:#8b949e">Preencha as credenciais do seu app no Mercado Livre</span>
+  </div>
+
+  <label>App ID (Client ID)</label>
+  <input type="text" id="cid" placeholder="8667328126564277">
+
+  <label>Client Secret</label>
+  <input type="password" id="cs" placeholder="Cole o Client Secret aqui">
+
+  <label>Redirect URI</label>
+  <input type="text" id="ru" placeholder="https://SEU_USUARIO.github.io/ml-callback">
+
+  <hr class="sep">
+
+  <div class="step">
+    <span class="num">2</span>
+    <span style="font-size:13px;color:#8b949e">Abra a autorização, aprove, copie a URL do GitHub e cole abaixo</span>
+  </div>
+
+  <button class="btn btn-blue" onclick="openAuth()">🔑 Abrir Autorização no Mercado Livre</button>
+
+  <label>URL completa após autorizar (começa com https://...github.io...?code=...)</label>
+  <textarea id="cburl" placeholder="https://lsnowbal.github.io/ml-callback/?code=TG-..."></textarea>
+
+  <p class="warn">⚠ O código expira em ~5 minutos. Clique logo após colar.</p>
+
+  <button class="btn btn-green" onclick="exchange()">🔄 Trocar Código por Token</button>
+
+  <div class="result" id="res">
+    <div class="rtitle" id="rtitle"></div>
+    <div id="rbody"></div>
+  </div>
+</div>
+
+<script>
+// Pré-preencher redirect URI com a URL desta página (sem /trocar.html)
+window.addEventListener('load', () => {
+  const base = window.location.origin + window.location.pathname.replace('/trocar.html','');
+  document.getElementById('ru').value = base;
+});
+
+function openAuth() {
+  const cid = v('cid'), ru = v('ru');
+  if (!cid || !ru) { alert('Preencha App ID e Redirect URI.'); return; }
+  const url = 'https://auth.mercadolivre.com.br/authorization?' +
+    new URLSearchParams({response_type:'code',client_id:cid,redirect_uri:ru});
+  window.open(url, '_blank');
+}
+
+function v(id) { return document.getElementById(id).value.trim(); }
+
+async function exchange() {
+  const cid = v('cid'), cs = v('cs'), ru = v('ru'), cburl = v('cburl');
+  const res = document.getElementById('res');
+  const rt  = document.getElementById('rtitle');
+  const rb  = document.getElementById('rbody');
+
+  if (!cid||!cs||!ru||!cburl) { alert('Preencha todos os campos.'); return; }
+
+  let code;
+  try { code = new URL(cburl).searchParams.get('code'); } catch {}
+  if (!code) {
+    if (cburl.includes('code=')) {
+      const m = cburl.match(/[?&]code=([^&]+)/);
+      code = m ? m[1] : null;
+    }
+  }
+  if (!code) { alert('Código não encontrado. Cole a URL completa.'); return; }
+
+  res.className = 'result'; res.style.display='block';
+  rt.style.color = '#d29922';
+  rt.textContent = '⏳ Conectando ao Mercado Livre...';
+  rb.innerHTML   = '';
+
+  const body = new URLSearchParams({
+    grant_type:'authorization_code', client_id:cid,
+    client_secret:cs, code, redirect_uri:ru
+  });
+
+  let data = null, errMsg = '';
+
+  // Tentativa 1: direto (funciona de HTTPS origin pois não há bloqueio de CORS do ML)
+  try {
+    const r = await fetch('https://api.mercadolivre.com/oauth/token', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: body.toString()
+    });
+    data = await r.json();
+  } catch(e) { errMsg = e.message; }
+
+  // Tentativa 2: via proxy allorigins (se CORS bloquear)
+  if (!data?.access_token) {
+    rt.textContent = '⏳ Tentativa 2 via proxy...';
+    try {
+      const target  = 'https://api.mercadolivre.com/oauth/token';
+      const proxyUrl= 'https://api.allorigins.win/raw?url=' + encodeURIComponent(target);
+      const r2 = await fetch(proxyUrl, {
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body: body.toString()
+      });
+      const txt = await r2.text();
+      data = JSON.parse(txt);
+    } catch(e2) { errMsg += ' | ' + e2.message; }
+  }
+
+  if (!data?.access_token) {
+    res.className='result err';
+    rt.style.color='#da3633';
+    rt.textContent = '❌ Erro: ' + (data?.message || errMsg);
+    return;
+  }
+
+  // Buscar seller_id
+  let sellerId = '';
+  try {
+    const me = await fetch('https://api.mercadolivre.com/users/me',
+      {headers:{Authorization:'Bearer '+data.access_token}});
+    const mj = await me.json();
+    sellerId  = String(mj.id||'');
+  } catch {}
+
+  const tokenJson = JSON.stringify({
+    access_token:  data.access_token,
+    refresh_token: data.refresh_token||'',
+    seller_id:     sellerId
+  }, null, 2);
+
+  res.className='result ok';
+  rt.style.color='#2ea043';
+  rt.textContent = '✅ Token obtido! Seller ID: ' + sellerId;
+  rb.innerHTML = `
+    <p style="font-size:13px;color:#8b949e;margin-bottom:10px">
+      Clique em <strong style="color:#e6edf3">Copiar JSON</strong>, depois abra o
+      Prompt de Comando na pasta do app e execute:<br>
+      <code style="color:#3fb950">python SALVAR_TOKEN_JSON.py</code>
+    </p>
+    <div class="box" id="tjson">${tokenJson}</div>
+    <button class="copy-btn" onclick="cp()">📋 Copiar JSON</button>
+    <p class="hint">Após copiar, cole quando o script pedir e pressione Enter duas vezes.</p>`;
+}
+
+function cp() {
+  navigator.clipboard.writeText(document.getElementById('tjson').textContent)
+    .then(()=>{
+      const b=document.querySelector('.copy-btn');
+      b.textContent='✔ Copiado!'; b.style.background='#2ea043';
+      setTimeout(()=>{b.textContent='📋 Copiar JSON';b.style.background='#1f6feb'},2000);
+    });
+}
+</script>
+</body>
+</html>
