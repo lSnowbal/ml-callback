@@ -165,15 +165,15 @@ async function exchange() {
     client_secret:cs, code, redirect_uri:ru
   });
 
-  let data = null, errMsg = '';
+  let data = null, errMsg = '', rawResp = '';
   try {
     const r = await fetch(workerUrl, {
       method: 'POST',
       headers: {'Content-Type':'application/x-www-form-urlencoded'},
       body: body.toString()
     });
-    const txt = await r.text();
-    data = JSON.parse(txt);
+    rawResp = await r.text();
+    try { data = JSON.parse(rawResp); } catch { data = { raw: rawResp }; }
   } catch(e) { errMsg = e.message; }
 
   btn.disabled = false;
@@ -181,7 +181,14 @@ async function exchange() {
   if (!data?.access_token) {
     res.className='result err';
     rt.style.color='#da3633';
-    rt.textContent = '❌ Erro: ' + (data?.message || errMsg || JSON.stringify(data));
+    rt.textContent = '❌ Erro do Mercado Livre:';
+    rb.innerHTML = `<pre style="color:#da3633;font-size:11px;white-space:pre-wrap;word-break:break-all">${
+      data?.message || data?.error || data?.raw || errMsg || rawResp || 'Resposta vazia'
+    }</pre>
+    <p style="color:#8b949e;font-size:12px;margin-top:8px">
+      Se aparecer "invalid_grant": o código expirou — clique em Abrir Autorização novamente.<br>
+      Se aparecer outro erro: copie o texto acima e envie para análise.
+    </p>`;
     return;
   }
 
