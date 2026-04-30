@@ -159,13 +159,25 @@ async function exchange(){
   rb.innerHTML=(saved
     ?`<p class="hint" style="color:#30d158">✔ Credenciais salvas no Worker. Abra o ML Auto Sender → Configurações → preencha Access Token e Seller ID → Enviar Credenciais ao Worker.</p>`
     :`<p class="hint">Copie o JSON e cole no ML Auto Sender → Configurações → Enviar Credenciais ao Worker.</p>`)
-    +`<div class="jbox" id="tj">${tj}</div><button class="cbtn" onclick="cp()">📋 Copiar JSON</button>`;
+    +`<div class="jbox" id="tj">${tj}</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="cbtn" onclick="cpToken('${data.access_token}')">📋 Copiar Token</button>
+      <button class="cbtn" style="background:#636366" onclick="cp()">{ } Copiar JSON</button>
+    </div>`;
 }
 
+function cpToken(token){
+  navigator.clipboard.writeText(token).then(()=>{
+    const btns=document.querySelectorAll('.cbtn'); 
+    btns[0].textContent='✔ Copiado!'; btns[0].style.background='#30d158';
+    setTimeout(()=>{btns[0].textContent='📋 Copiar Token';btns[0].style.background='#0a84ff';},2000);
+  });
+}
 function cp(){
   navigator.clipboard.writeText($('tj').textContent).then(()=>{
-    const b=document.querySelector('.cbtn'); b.textContent='✔ Copiado!'; b.style.background='#30d158';
-    setTimeout(()=>{b.textContent='📋 Copiar JSON';b.style.background='#0a84ff';},2000);
+    const btns=document.querySelectorAll('.cbtn'); 
+    btns[1].textContent='✔ Copiado!'; btns[1].style.background='#30d158';
+    setTimeout(()=>{btns[1].textContent='{ } Copiar JSON';btns[1].style.background='#636366';},2000);
   });
 }
 </script>
