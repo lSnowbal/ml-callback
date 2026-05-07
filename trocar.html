@@ -93,7 +93,7 @@ function auth(){
   const cid=v('cid'), ru=v('ru');
   if(!cid||!ru){ alert('Preencha App ID e Redirect URI.'); return; }
   window.open('https://auth.mercadolivre.com.br/authorization?'+
-    new URLSearchParams({response_type:'code',client_id:cid,redirect_uri:ru}),'_blank');
+    new URLSearchParams({response_type:'code',client_id:cid,redirect_uri:ru,scope:'offline_access read write'}),'_blank');
 }
 
 function code(url){ try{return new URL(url).searchParams.get('code');}catch{const m=url.match(/[?&]code=([^&]+)/);return m?m[1]:null;} }
