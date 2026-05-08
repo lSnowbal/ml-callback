@@ -2,69 +2,304 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>ML Auto Sender — Callback</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f10;color:#f5f5f7;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.card{background:#1c1c1e;border:1px solid #3a3a3c;border-radius:16px;padding:36px;max-width:520px;width:100%;text-align:center}
-.icon{font-size:52px;margin-bottom:16px}
-h2{font-size:20px;font-weight:700;margin-bottom:8px}
-.sub{color:#8e8e93;font-size:13px;margin-bottom:24px}
-.step{background:#2c2c2e;border-radius:10px;padding:14px 16px;text-align:left;margin-bottom:10px}
-.slabel{font-size:10px;font-weight:700;letter-spacing:1px;color:#8e8e93;text-transform:uppercase;margin-bottom:8px}
-.url{background:#0f0f10;border:1px solid #30d158;border-radius:6px;padding:10px 12px;font-family:'Consolas',monospace;font-size:12px;color:#30d158;word-break:break-all;user-select:all}
-.cbtn{margin-top:10px;background:#0a84ff;color:#fff;border:none;border-radius:6px;padding:8px 18px;cursor:pointer;font-size:13px;font-weight:700}
-.cbtn:hover{background:#409cff}
-.hint{color:#8e8e93;font-size:12px;margin-top:8px}
-a{color:#0a84ff;text-decoration:none}
-.err h2{color:#ff453a}
-</style>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0f0f10">
+<title>ML Auto Sender</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
-<div class="card" id="card">
-  <div class="icon" id="icon">⏳</div>
-  <h2 id="title">Verificando...</h2>
-  <p class="sub" id="sub"></p>
-  <div id="content"></div>
-</div>
-<script>
-(function(){
-  const params=new URLSearchParams(location.search);
-  const code=params.get('code'), error=params.get('error');
-  const icon=$('icon'), title=$('title'), sub=$('sub'), content=$('content'), card=$('card');
-  function $(id){return document.getElementById(id);}
 
-  if(error||!code){
-    icon.textContent='❌'; title.textContent='Autorização negada'; title.style.color='#ff453a';
-    sub.textContent='Feche esta aba e tente novamente.';
-    return;
-  }
-
-  icon.textContent='✅'; title.textContent='Autorização concluída!'; title.style.color='#30d158';
-  sub.textContent='Copie a URL desta página e cole na tela de autorização.';
-
-  const fullUrl=location.href;
-  try{navigator.clipboard.writeText(fullUrl);}catch{}
-
-  content.innerHTML=`
-    <div class="step">
-      <div class="slabel">Passo 1 — Copie esta URL</div>
-      <div class="url" id="furl">${fullUrl}</div>
-      <button class="cbtn" onclick="cp()">📋 Copiar URL</button>
+<!-- Login Screen -->
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <svg viewBox="0 0 24 24" width="40" height="40"><path fill="#30d158" d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg>
     </div>
-    <div class="step">
-      <div class="slabel">Passo 2</div>
-      <p style="font-size:13px;color:#8e8e93">Volte para <a href="trocar.html">trocar.html</a>, cole a URL no campo e clique em <strong style="color:#f5f5f7">Trocar Código por Token</strong>.</p>
-    </div>`;
+    <h1>ML Auto Sender</h1>
+    <p class="login-sub">Entre com sua chave secreta do Worker</p>
+    <input type="password" id="login-secret" placeholder="Chave secreta" autocomplete="off">
+    <input type="text" id="login-worker" placeholder="URL do Worker (opcional)" value="https://crimson-heart-bac6.michaelvmardegam.workers.dev">
+    <button id="login-btn">Entrar</button>
+    <div id="login-err" class="login-err"></div>
+    <div class="login-tip">A chave fica salva neste navegador. Para sair, limpe os dados do site.</div>
+  </div>
+</div>
 
-  function cp(){
-    navigator.clipboard.writeText(fullUrl).then(()=>{
-      const b=document.querySelector('.cbtn'); b.textContent='✔ Copiado!'; b.style.background='#30d158';
-      setTimeout(()=>{b.textContent='📋 Copiar URL';b.style.background='#0a84ff';},2000);
-    });
-  }
-  window.cp=cp;
-})();
-</script>
+<!-- Main App -->
+<div id="app" class="app hidden">
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="#30d158" d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg>
+        <span>ML Auto Sender</span>
+      </div>
+      <button id="sidebar-close" class="icon-btn mobile-only" aria-label="Fechar menu">×</button>
+    </div>
+    <nav class="nav">
+      <button class="nav-btn active" data-screen="dashboard"><span class="nav-icon">⊞</span><span>Dashboard</span></button>
+      <button class="nav-btn" data-screen="produtos"><span class="nav-icon">▦</span><span>Produtos</span></button>
+      <button class="nav-btn" data-screen="mensagens"><span class="nav-icon">✉</span><span>Mensagens</span></button>
+      <button class="nav-btn" data-screen="pedidos"><span class="nav-icon">⊙</span><span>Pedidos</span></button>
+      <button class="nav-btn" data-screen="falhas"><span class="nav-icon">⚠</span><span>Falhas</span></button>
+      <button class="nav-btn" data-screen="estatisticas"><span class="nav-icon">📊</span><span>Estatísticas</span></button>
+      <button class="nav-btn" data-screen="teste"><span class="nav-icon">🧪</span><span>Modo Teste</span></button>
+      <button class="nav-btn" data-screen="config"><span class="nav-icon">⚙</span><span>Configurações</span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <button id="theme-toggle" class="ghost-btn" title="Alternar tema">🌙 Tema</button>
+      <button id="logout-btn" class="ghost-btn">↪ Sair</button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <button id="sidebar-open" class="icon-btn mobile-only" aria-label="Menu">☰</button>
+      <div class="status-pill" id="status-pill">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Carregando…</span>
+      </div>
+      <div class="topbar-right">
+        <span class="badge" id="msgs-today">0 hoje</span>
+        <button id="refresh-btn" class="icon-btn" title="Atualizar">↻</button>
+      </div>
+    </header>
+
+    <!-- Screens -->
+    <section class="screen" data-screen="dashboard">
+      <div class="screen-head">
+        <h1>Dashboard</h1>
+        <p class="muted">Visão geral e controle do monitoramento</p>
+      </div>
+      <div class="action-bar">
+        <button class="btn green" id="btn-activate">▶ Ativar</button>
+        <button class="btn red" id="btn-pause">⏸ Pausar</button>
+        <button class="btn dark" id="btn-checknow">↻ Verificar Agora</button>
+      </div>
+      <div class="action-bar secondary">
+        <button class="btn ghost" id="btn-zerar">Zerar Contadores</button>
+        <button class="btn warn" id="btn-clearqueue">Limpar Fila</button>
+        <button class="btn red-dim" id="btn-reset">Reset Total</button>
+      </div>
+      <div class="cards">
+        <div class="card">
+          <div class="card-label">Pedidos Detectados</div>
+          <div class="card-value blue" id="stat-orders">0</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Mensagens Enviadas</div>
+          <div class="card-value green" id="stat-messages">0</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Vendas Confirmadas</div>
+          <div class="card-value orange" id="stat-confirmed">0</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Na Fila</div>
+          <div class="card-value violet" id="stat-queue">0</div>
+        </div>
+      </div>
+      <div class="block">
+        <div class="block-head">
+          <h2>Log de Atividade</h2>
+          <button class="btn ghost sm" id="btn-clearlog">Limpar</button>
+        </div>
+        <div class="log" id="log"></div>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="produtos">
+      <div class="screen-head">
+        <h1>Produtos</h1>
+        <p class="muted">Habilite produtos e configure delays</p>
+      </div>
+      <div class="toolbar">
+        <input class="search" id="prod-search" placeholder="🔍 Buscar produto…">
+        <button class="btn dark" id="btn-loadprods">↻ Carregar</button>
+        <span class="muted small" id="prod-count"></span>
+      </div>
+      <div class="prod-list" id="prod-list"></div>
+    </section>
+
+    <section class="screen hidden" data-screen="mensagens">
+      <div class="screen-head">
+        <h1>Mensagens</h1>
+        <p class="muted">Templates reutilizáveis e atribuição por produto</p>
+      </div>
+      <div class="msg-tabs">
+        <button class="tab active" data-tab="templates">Biblioteca de Templates</button>
+        <button class="tab" data-tab="produtos">Por Produto</button>
+      </div>
+      <div class="tab-content active" data-tab="templates">
+        <div class="toolbar">
+          <input class="search" id="tpl-name" placeholder="Nome do template (ex: Sequência padrão)">
+          <button class="btn green" id="btn-newtpl">+ Novo</button>
+        </div>
+        <div id="tpl-list" class="tpl-list"></div>
+      </div>
+      <div class="tab-content hidden" data-tab="produtos">
+        <div class="toolbar">
+          <select id="msg-prod-select"><option value="">Selecione um produto…</option></select>
+          <button class="btn dark" id="btn-applytpl">Aplicar Template…</button>
+        </div>
+        <div id="msg-editor" class="msg-editor hidden">
+          <div class="msg-row"><label>Mensagem 1 <span class="muted small">(boas-vindas)</span></label><textarea data-idx="0"></textarea></div>
+          <div class="msg-row"><label>Mensagem 2 <span class="muted small">(produto/instruções)</span></label><textarea data-idx="1"></textarea></div>
+          <div class="msg-row"><label>Mensagem 3 <span class="muted small">(chave/serial — usa {key})</span></label><textarea data-idx="2"></textarea></div>
+          <div class="msg-row"><label>Mensagem 4 <span class="muted small">(despedida)</span></label><textarea data-idx="3"></textarea></div>
+          <div class="msg-actions">
+            <button class="btn green" id="btn-savemsg">💾 Salvar</button>
+            <button class="btn ghost" id="btn-savetpl">📑 Salvar como Template</button>
+          </div>
+          <div class="msg-vars muted small">
+            Variáveis disponíveis: <code>{nome}</code> nome do comprador · <code>{key}</code> chave configurada do produto · <code>{pedido}</code> ID do pedido
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="pedidos">
+      <div class="screen-head">
+        <h1>Pedidos</h1>
+        <p class="muted">Histórico das últimas vendas processadas</p>
+      </div>
+      <div class="toolbar">
+        <input class="search" id="ord-search" placeholder="🔍 Buscar comprador, ID…">
+        <select id="ord-filter">
+          <option value="all">Todos</option>
+          <option value="pending">Aguardando</option>
+          <option value="sending">Enviando</option>
+          <option value="done">Concluídos</option>
+        </select>
+        <button class="btn dark" id="btn-loadords">↻ Atualizar</button>
+        <button class="btn ghost" id="btn-export">⬇ CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="ord-table">
+          <thead><tr><th>Pedido</th><th>Produto</th><th>Comprador</th><th>Mensagens</th><th>Status</th><th>Data</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="falhas">
+      <div class="screen-head">
+        <h1>Falhas</h1>
+        <p class="muted">Mensagens que não foram entregues</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn dark" id="btn-loadfail">↻ Atualizar</button>
+        <button class="btn red-dim" id="btn-clearfail">Limpar Tudo</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="fail-table">
+          <thead><tr><th>Pedido</th><th>Comprador</th><th>Msg</th><th>Motivo</th><th>Quando</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="estatisticas">
+      <div class="screen-head">
+        <h1>Estatísticas</h1>
+        <p class="muted">Análise de desempenho do sistema</p>
+      </div>
+      <div class="cards">
+        <div class="card">
+          <div class="card-label">Taxa de Sucesso</div>
+          <div class="card-value green" id="kpi-success">0%</div>
+          <div class="card-tip muted small">Mensagens enviadas vs total</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Tempo Médio</div>
+          <div class="card-value blue" id="kpi-avg">—</div>
+          <div class="card-tip muted small">Da venda à 1ª mensagem</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Conversão</div>
+          <div class="card-value violet" id="kpi-conv">0%</div>
+          <div class="card-tip muted small">Pedidos confirmados</div>
+        </div>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>Vendas por Dia</h2></div>
+        <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="teste">
+      <div class="screen-head">
+        <h1>Modo Teste</h1>
+        <p class="muted">Envie uma mensagem manualmente para 1 pedido</p>
+      </div>
+      <div class="block">
+        <div class="form-grid">
+          <label>ID do Pedido<input id="test-order" placeholder="2000016295013912"></label>
+          <label>Mensagem<textarea id="test-text" placeholder="Texto da mensagem (350 caracteres max)" maxlength="350"></textarea></label>
+          <button class="btn green" id="btn-testsend">📨 Enviar Mensagem de Teste</button>
+        </div>
+        <div id="test-result" class="test-result"></div>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>Reprocessar Pedido</h2></div>
+        <p class="muted small">Use isso se um pedido já foi processado mas você quer enviar mensagens de novo. Remove ele dos "já processados" e ele será detectado no próximo ciclo.</p>
+        <div class="form-grid">
+          <label>ID do Pedido<input id="retry-order" placeholder="2000016295013912"></label>
+          <button class="btn warn" id="btn-retry">🔄 Reprocessar</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="config">
+      <div class="screen-head">
+        <h1>Configurações</h1>
+        <p class="muted">Credenciais e preferências do sistema</p>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>Credenciais Mercado Livre</h2></div>
+        <div class="form-grid">
+          <label>Access Token<input id="cfg-access"></label>
+          <label>Refresh Token<input id="cfg-refresh"></label>
+          <label>Client ID<input id="cfg-cid"></label>
+          <label>Client Secret<input type="password" id="cfg-cs"></label>
+          <label>Seller ID<input id="cfg-seller"></label>
+          <button class="btn blue" id="btn-savecreds">💾 Salvar no Worker</button>
+        </div>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>OAuth Mercado Livre</h2></div>
+        <p class="muted small">Renovar autorização (uma vez a cada 6 meses, automaticamente entre essas vezes)</p>
+        <a id="oauth-link" href="#" class="btn dark">🔑 Renovar autorização</a>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>Sobre o Sistema</h2></div>
+        <div class="info-grid">
+          <div><span class="muted">Worker:</span> <span id="info-worker">—</span></div>
+          <div><span class="muted">Versão:</span> <span id="info-version">—</span></div>
+          <div><span class="muted">Status:</span> <span id="info-status">—</span></div>
+          <div><span class="muted">Token salvo:</span> <span id="info-token">—</span></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Toast container -->
+<div id="toasts" class="toasts"></div>
+
+<!-- Modal -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div id="modal-title" class="modal-title"></div>
+    <div id="modal-body" class="modal-body"></div>
+    <div id="modal-actions" class="modal-actions"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>

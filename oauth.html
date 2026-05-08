@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f0f10">
+<title>ML Auto Sender — Autorização</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
+</head>
+<body>
+<div class="login-screen">
+  <div class="login-card" style="max-width:520px">
+    <div class="login-logo">
+      <svg viewBox="0 0 24 24" width="40" height="40"><path fill="#30d158" d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></svg>
+    </div>
+    <h1 style="text-align:center">Autorização Mercado Livre</h1>
+    <p class="login-sub">Configure uma vez · renova automaticamente</p>
+
+    <div class="block" style="background:var(--surface-2);margin-bottom:14px">
+      <div class="form-grid">
+        <label>URL do Worker<input id="worker" placeholder="https://seu-worker.workers.dev"></label>
+        <label>Chave secreta do Worker<input type="password" id="secret"></label>
+      </div>
+    </div>
+
+    <div class="block" style="background:var(--surface-2);margin-bottom:14px">
+      <div class="form-grid">
+        <label>App ID (Client ID)<input id="cid" placeholder="Ex: 8667328126564277"></label>
+        <label>Client Secret<input type="password" id="cs"></label>
+        <label>Redirect URI<input id="ru"></label>
+      </div>
+    </div>
+
+    <button class="btn blue" id="btn-auth" style="width:100%;margin-bottom:10px">🔑 Abrir Autorização no ML</button>
+
+    <div class="block" style="background:var(--surface-2);margin-bottom:14px">
+      <label class="muted small" style="display:block;margin-bottom:6px">URL completa após autorizar</label>
+      <textarea id="cburl" style="width:100%;min-height:60px;padding:10px;background:var(--surface);border:1px solid var(--border-strong);border-radius:8px;color:var(--text);font-family:monospace;font-size:12px"></textarea>
+      <div class="muted small" style="color:var(--warning);margin-top:6px">⚠ O código expira em ~5 min. Cole logo após autorizar.</div>
+    </div>
+
+    <button class="btn green" id="btn-exchange" style="width:100%">🔄 Trocar Código por Token</button>
+
+    <div id="result" style="margin-top:14px"></div>
+
+    <div class="login-tip" style="margin-top:20px">
+      Dica: o sistema usa <code>scope=offline_access</code> para auto-renovar o token a cada 6h.
+      Se o ML não retornar refresh_token, verifique no DevCenter se "Refresh Token" está ativado e PKCE desativado.
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// Pre-fill from localStorage or current URL
+window.addEventListener('load', () => {
+  $('ru').value = location.origin + location.pathname.replace('oauth.html','');
+  ['worker','secret','cid','cs','ru'].forEach(k => {
+    const v = localStorage.getItem('mlas_oauth_' + k);
+    if (v) $(k).value = v;
+  });
+  // If returning from auth, prefill the URL
+  if (location.search.includes('code=')) {
+    $('cburl').value = location.href;
+  }
+});
+
+const save = () => ['worker','secret','cid','cs','ru'].forEach(k => localStorage.setItem('mlas_oauth_' + k, $(k).value.trim()));
+const v = id => $(id).value.trim();
+
+$('btn-auth').addEventListener('click', () => {
+  save();
+  const cid = v('cid'), ru = v('ru');
+  if (!cid || !ru) { alert('Preencha Client ID e Redirect URI.'); return; }
+  const url = 'https://auth.mercadolivre.com.br/authorization?' + new URLSearchParams({
+    response_type: 'code', client_id: cid, redirect_uri: ru,
+    scope: 'offline_access read write'
+  });
+  window.open(url, '_blank');
+});
+
+const code = url => {
+  try { return new URL(url).searchParams.get('code'); }
+  catch { const m = url.match(/[?&]code=([^&]+)/); return m ? m[1] : null; }
+};
+
+$('btn-exchange').addEventListener('click', async () => {
+  save();
+  const worker = v('worker'), secret = v('secret'), cid = v('cid'), cs = v('cs'), ru = v('ru');
+  const cburl = v('cburl');
+  const result = $('result');
+  const c = code(cburl);
+  if (!worker || !cid || !cs) { alert('Preencha Worker, Client ID e Client Secret.'); return; }
+  if (!c) { alert('Código não encontrado na URL.'); return; }
+
+  result.innerHTML = '<div class="test-result">⏳ Trocando código por token...</div>';
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code', client_id: cid, client_secret: cs,
+    code: c, redirect_uri: ru
+  }).toString();
+
+  let data;
+  try {
+    const r = await fetch(worker.replace(/\/$/,'') + '/api/oauth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    data = await r.json();
+  } catch (e) {
+    result.innerHTML = '<div class="test-result err">Erro de conexão: ' + e.message + '</div>'; return;
+  }
+
+  if (!data?.access_token) {
+    const msg = data?.message || data?.error_description || data?.error || JSON.stringify(data);
+    result.innerHTML = `<div class="test-result err">❌ ${msg}</div>` +
+      (msg.includes('invalid_grant') ? '<div class="muted small" style="margin-top:6px">O código expirou. Clique em "Abrir Autorização" e tente de novo em até 5 min.</div>' : '');
+    return;
+  }
+
+  if (!data.refresh_token) {
+    result.innerHTML = '<div class="test-result err">⚠ Token recebido SEM refresh_token. Verifique no DevCenter: <br>1. "Refresh Token" deve estar marcado em Fluxos OAuth<br>2. "PKCE necessário" deve estar DESMARCADO<br>3. O scope retornado deve incluir <code>offline_access</code></div>';
+    return;
+  }
+
+  // Try save to Worker
+  let saved = false;
+  try {
+    const sr = await fetch(worker.replace(/\/$/,'') + '/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Secret': secret },
+      body: JSON.stringify({
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        seller_id: String(data.user_id || ''),
+        client_id: cid, client_secret: cs
+      })
+    });
+    saved = sr.ok;
+  } catch {}
+
+  result.innerHTML = `
+    <div class="test-result ok">
+      ✅ Sucesso! Tokens recebidos com offline_access<br>
+      <small>Seller ID: ${data.user_id} · Scope: ${(data.scope||'').includes('offline_access') ? 'offline_access ✓' : '⚠ sem offline_access'}</small>
+    </div>
+    <div style="margin-top:10px;padding:10px;background:var(--surface-2);border-radius:8px;font-family:monospace;font-size:11px;word-break:break-all">
+      <strong>Access Token:</strong><br>${data.access_token}<br><br>
+      <strong>Refresh Token:</strong><br>${data.refresh_token}
+    </div>
+    <div style="margin-top:10px;color:${saved ? 'var(--accent)' : 'var(--warning)'};font-size:13px">
+      ${saved ? '✓ Salvo no Worker automaticamente. Pode fechar essa página.' : '⚠ Não consegui salvar no Worker. Cole os tokens manualmente em Configurações.'}
+    </div>
+  `;
+});
+</script>
+</body>
+</html>
