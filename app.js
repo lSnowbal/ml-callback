@@ -154,7 +154,7 @@
     if (name === 'produtos' && state.products.length === 0) loadProducts();
     if (name === 'pedidos') loadOrders();
     if (name === 'falhas') loadFails();
-    if (name === 'mensagens') { loadTemplates(); loadProductsForMsg(); }
+    if (name === 'mensagens') { loadTemplates(); loadMessagesScreen(); }
     if (name === 'estatisticas') renderStats();
   }
 
@@ -193,10 +193,22 @@
     $('btn-clearfail').addEventListener('click', () => danger('/api/failed_messages/clear', 'Limpar falhas', 'A lista de falhas será zerada.'));
 
     $('btn-newtpl').addEventListener('click', newTemplate);
-    $('btn-savetpl').addEventListener('click', saveTemplateFromEditor);
-    $('btn-savemsg').addEventListener('click', saveMessages);
-    $('btn-applytpl').addEventListener('click', applyTemplate);
-    $('msg-prod-select').addEventListener('change', loadProductMessages);
+    // Messages screen handlers (multi-select edition)
+    $('btn-loadmsg').addEventListener('click', loadMessagesScreen);
+    $('msg-search').addEventListener('input', renderMessagesList);
+    $('msg-filter').addEventListener('change', renderMessagesList);
+    $('msg-selectall').addEventListener('change', e => {
+      const rows = document.querySelectorAll('#msg-prod-list .msg-prod-row[data-pid]');
+      if (e.target.checked) {
+        rows.forEach(r => state.msgSelected.add(r.dataset.pid));
+      } else {
+        rows.forEach(r => state.msgSelected.delete(r.dataset.pid));
+      }
+      renderMessagesList();
+    });
+    $('btn-bulk-edit').addEventListener('click', bulkEditMessages);
+    $('btn-bulk-template').addEventListener('click', bulkApplyTemplate);
+    $('btn-bulk-clear').addEventListener('click', () => { state.msgSelected.clear(); renderMessagesList(); });
 
     $$('.tab').forEach(t => t.addEventListener('click', () => {
       $$('.tab').forEach(x => x.classList.remove('active'));
@@ -297,7 +309,6 @@
     try {
       state.products = await api('/api/products');
       renderProducts();
-      loadProductsForMsg();
     } catch (e) { toast(e.message, 'err'); }
   }
 
@@ -452,72 +463,296 @@
     } catch (e) { toast(e.message, 'err'); }
   }
 
-  function loadProductsForMsg() {
-    const sel = $('msg-prod-select');
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">Selecione um produto…</option>';
-    state.products.filter(p => p.enabled).forEach(p => {
-      sel.appendChild(el('option', { value: p.id }, `${p.title?.slice(0, 60) || p.id}`));
-    });
-    state.products.filter(p => !p.enabled).forEach(p => {
-      sel.appendChild(el('option', { value: p.id }, `(desabilitado) ${p.title?.slice(0, 60) || p.id}`));
-    });
-    if (cur) sel.value = cur;
-  }
+  // ─── Messages screen — multi-select with bulk edit ──────────────
+  // state.allMessages: { item_id: [m1, m2, m3, m4] } cache
+  // state.msgSelected: Set<item_id> currently selected
+  state.allMessages = {};
+  state.msgSelected = new Set();
 
-  async function loadProductMessages() {
-    const id = $('msg-prod-select').value;
-    if (!id) { $('msg-editor').classList.add('hidden'); return; }
-    state.selectedProductId = id;
-    $('msg-editor').classList.remove('hidden');
+  async function loadMessagesScreen() {
+    const list = $('msg-prod-list');
+    list.innerHTML = '<div class="muted small" style="padding:24px;text-align:center">Carregando produtos e mensagens…</div>';
+
+    // Make sure products are loaded
+    if (!state.products.length) {
+      try { state.products = await api('/api/products'); } catch (e) { toast(e.message, 'err'); return; }
+    }
+
+    // Load messages for all products in parallel (1 KV read per call, OK)
     try {
-      const msgs = await api(`/api/messages?id=${id}`);
-      [0,1,2,3].forEach(i => {
-        const ta = document.querySelector(`#msg-editor textarea[data-idx="${i}"]`);
-        if (ta) ta.value = msgs[i] || '';
-      });
+      const calls = state.products.map(p =>
+        api(`/api/messages?id=${p.id}`).then(m => [p.id, m]).catch(() => [p.id, ['','','','']])
+      );
+      const results = await Promise.all(calls);
+      state.allMessages = Object.fromEntries(results);
     } catch (e) { toast(e.message, 'err'); }
+
+    renderMessagesList();
   }
 
-  async function saveMessages() {
-    const id = state.selectedProductId;
-    if (!id) return;
-    const msgs = [0,1,2,3].map(i => document.querySelector(`#msg-editor textarea[data-idx="${i}"]`).value);
-    try {
-      await api('/api/messages', { method: 'POST', body: { item_id: id, messages: msgs }});
-      toast('Mensagens salvas', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
+  function renderMessagesList() {
+    const q = ($('msg-search').value || '').toLowerCase();
+    const filter = $('msg-filter').value;
+    const list = $('msg-prod-list');
+    list.innerHTML = '';
+
+    const filtered = state.products.filter(p => {
+      if (q && !`${p.id}${p.title}`.toLowerCase().includes(q)) return false;
+      if (filter === 'enabled' && !p.enabled) return false;
+      const msgs = state.allMessages[p.id] || ['','','','',];
+      const filledCount = msgs.filter(m => (m || '').trim()).length;
+      if (filter === 'with-msg' && filledCount === 0) return false;
+      if (filter === 'without-msg' && filledCount > 0) return false;
+      return true;
+    });
+
+    $('msg-count').textContent = `${filtered.length} de ${state.products.length}`;
+
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="muted small" style="padding:24px;text-align:center">Nenhum produto corresponde aos filtros.</div>';
+      updateBulkBar();
+      return;
+    }
+
+    filtered.forEach(p => {
+      const msgs = state.allMessages[p.id] || ['','','','',];
+      const filled = msgs.filter(m => (m || '').trim()).length;
+      const row = el('div', { class: 'msg-prod-row' + (state.msgSelected.has(p.id) ? ' selected' : ''), 'data-pid': p.id });
+
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = state.msgSelected.has(p.id);
+      cb.onchange = e => {
+        e.stopPropagation();
+        if (cb.checked) state.msgSelected.add(p.id); else state.msgSelected.delete(p.id);
+        row.classList.toggle('selected', cb.checked);
+        updateBulkBar();
+      };
+
+      const statusIcon = el('div', {
+        class: 'msg-status ' + (filled === 4 ? 'complete' : filled > 0 ? 'partial' : 'empty'),
+        title: filled === 4 ? 'Todas as 4 mensagens configuradas' : (filled > 0 ? `${filled}/4 mensagens` : 'Sem mensagens')
+      }, filled === 4 ? '✓' : filled > 0 ? '◐' : '○');
+
+      const info = el('div', { class: 'msg-prod-info' });
+      info.appendChild(el('div', { class: 'msg-prod-title' }, p.title || p.id));
+      const meta = el('div', { class: 'msg-prod-meta' });
+      meta.appendChild(el('span', {}, p.id));
+      if (p.enabled) meta.appendChild(el('span', { class: 'tag done' }, 'Habilitado'));
+      else meta.appendChild(el('span', { class: 'tag pending' }, 'Desabilitado'));
+      meta.appendChild(el('span', {}, `${filled}/4 msgs`));
+      info.appendChild(meta);
+
+      const editBtn = el('button', { class: 'btn ghost sm', onclick: e => { e.stopPropagation(); editSingleProductMessages(p); } }, '✏ Editar');
+
+      // Click on row toggles selection
+      row.addEventListener('click', () => { cb.click(); });
+
+      row.append(cb, statusIcon, info, editBtn);
+      list.appendChild(row);
+    });
+
+    updateBulkBar();
   }
 
-  function saveTemplateFromEditor() {
-    const id = state.selectedProductId; if (!id) return;
-    const msgs = [0,1,2,3].map(i => document.querySelector(`#msg-editor textarea[data-idx="${i}"]`).value);
+  function updateBulkBar() {
+    const n = state.msgSelected.size;
+    $('msg-selected-count').textContent = n;
+    const has = n > 0;
+    ['btn-bulk-edit','btn-bulk-template','btn-bulk-clear'].forEach(id => $(id).disabled = !has);
+    // Update select-all checkbox state
+    const visibleIds = Array.from(document.querySelectorAll('#msg-prod-list .msg-prod-row input[type="checkbox"]'));
+    const allChecked = visibleIds.length > 0 && visibleIds.every(cb => cb.checked);
+    const anyChecked = visibleIds.some(cb => cb.checked);
+    const sa = $('msg-selectall');
+    sa.checked = allChecked;
+    sa.indeterminate = anyChecked && !allChecked;
+  }
+
+  function editSingleProductMessages(p) {
+    state.msgSelected = new Set([p.id]);
+    renderMessagesList();
+    bulkEditMessages();
+  }
+
+  function bulkEditMessages() {
+    const ids = Array.from(state.msgSelected);
+    if (!ids.length) return;
+    // Determine starting values: if all selected have same content, prefill; else blank
+    const samples = ids.map(id => state.allMessages[id] || ['','','','']);
+    const initial = [0,1,2,3].map(i => {
+      const vals = samples.map(s => s[i] || '');
+      const unique = new Set(vals);
+      return unique.size === 1 ? vals[0] : '';
+    });
+    const allSame = initial.some(v => v !== '') || ids.length === 1;
+    const headerNote = ids.length === 1
+      ? `Editando mensagens de <strong>1 produto</strong>`
+      : `Editando mensagens de <strong>${ids.length} produtos</strong> ao mesmo tempo. ${allSame ? 'Mensagens atuais carregadas (são iguais entre os selecionados).' : '<span style="color:var(--warning)">Os produtos têm mensagens diferentes — preencher abaixo sobrescreve em todos.</span>'}`;
+
+    $('modal-title').textContent = ids.length === 1 ? 'Editar Mensagens' : `Editar Mensagens em Massa (${ids.length})`;
+    $('modal-body').innerHTML = `
+      <div class="muted small" style="margin-bottom:12px">${headerNote}</div>
+      <div class="msg-editor">
+        ${[0,1,2,3].map(i => `
+          <div class="msg-row">
+            <label>Mensagem ${i+1} ${i === 0 ? '<span class="muted small">(boas-vindas)</span>' : i === 2 ? '<span class="muted small">(usa {key})</span>' : ''}</label>
+            <textarea data-bulk-idx="${i}" placeholder="${ids.length > 1 && !allSame ? '(preencher sobrescreve em todos)' : ''}">${(initial[i]||'').replace(/</g,'&lt;')}</textarea>
+          </div>
+        `).join('')}
+        <div class="msg-vars muted small">Variáveis: <code>{nome}</code> nome do comprador · <code>{key}</code> chave do produto · <code>{pedido}</code> ID do pedido</div>
+      </div>
+    `;
+    $('modal-actions').innerHTML = '';
+    const cancel = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Cancelar');
+    const saveTpl = el('button', { class: 'btn dark', onclick: () => saveCurrentAsTemplate() }, '📑 Salvar como Template');
+    const save = el('button', { class: 'btn green', onclick: () => doBulkSave(ids) }, `💾 Salvar em ${ids.length}`);
+    $('modal-actions').append(cancel, saveTpl, save);
+    $('modal').classList.remove('hidden');
+  }
+
+  async function doBulkSave(ids) {
+    const newMsgs = [0,1,2,3].map(i => document.querySelector(`#modal textarea[data-bulk-idx="${i}"]`).value);
+    const btn = document.querySelector('#modal-actions .btn.green'); btn.disabled = true; btn.textContent = 'Salvando…';
+    let ok = 0, fail = 0;
+    for (const id of ids) {
+      try {
+        await api('/api/messages', { method: 'POST', body: { item_id: id, messages: newMsgs }});
+        state.allMessages[id] = [...newMsgs];
+        ok++;
+      } catch { fail++; }
+    }
+    $('modal').classList.add('hidden');
+    state.msgSelected.clear();
+    renderMessagesList();
+    toast(`✓ ${ok} salvos${fail ? ' · ' + fail + ' falharam' : ''}`, fail ? 'warn' : 'ok');
+  }
+
+  function saveCurrentAsTemplate() {
+    const msgs = [0,1,2,3].map(i => document.querySelector(`#modal textarea[data-bulk-idx="${i}"]`).value);
     const name = prompt('Nome para esse template:');
     if (!name) return;
     state.templates[name] = msgs;
     saveTemplate(name).then(() => toast('Template criado: ' + name, 'ok'));
   }
 
-  function applyTemplate() {
+  function bulkApplyTemplate() {
     const names = Object.keys(state.templates);
-    if (!names.length) { toast('Nenhum template salvo. Crie um na aba Biblioteca.', 'warn'); return; }
-    if (!state.selectedProductId) { toast('Selecione um produto primeiro', 'warn'); return; }
-    $('modal-title').textContent = 'Aplicar Template';
-    $('modal-body').innerHTML = `<div class="form-grid"><label>Escolha um template<select id="tpl-select">${names.map(n => `<option>${n}</option>`).join('')}</select></label></div>`;
+    if (!names.length) { toast('Crie um template primeiro (na seção Biblioteca de Templates)', 'warn'); return; }
+    const ids = Array.from(state.msgSelected);
+    $('modal-title').textContent = `Aplicar Template em ${ids.length} produto(s)`;
+    $('modal-body').innerHTML = `
+      <div class="muted small" style="margin-bottom:12px">As mensagens atuais serão sobrescritas pelos textos do template escolhido.</div>
+      <div class="form-grid">
+        <label>Escolha um template
+          <select id="bulk-tpl-select">
+            ${names.map(n => {
+              const c = (state.templates[n] || []).filter(m => (m||'').trim()).length;
+              return `<option value="${n}">${n} (${c} msgs)</option>`;
+            }).join('')}
+          </select>
+        </label>
+      </div>
+    `;
     $('modal-actions').innerHTML = '';
     const cancel = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Cancelar');
-    const apply = el('button', { class: 'btn green', onclick: () => {
-      const name = $('tpl-select').value;
+    const apply = el('button', { class: 'btn green', onclick: async () => {
+      const name = $('bulk-tpl-select').value;
       const msgs = state.templates[name];
-      [0,1,2,3].forEach(i => {
-        const ta = document.querySelector(`#msg-editor textarea[data-idx="${i}"]`);
-        if (ta) ta.value = msgs[i] || '';
-      });
+      apply.disabled = true; apply.textContent = 'Aplicando…';
+      let ok = 0, fail = 0;
+      for (const id of ids) {
+        try {
+          await api('/api/messages', { method: 'POST', body: { item_id: id, messages: msgs }});
+          state.allMessages[id] = [...msgs];
+          ok++;
+        } catch { fail++; }
+      }
       $('modal').classList.add('hidden');
-      toast('Template aplicado (clique Salvar pra confirmar)', 'ok');
-    }}, 'Aplicar');
+      state.msgSelected.clear();
+      renderMessagesList();
+      toast(`Template "${name}" aplicado em ${ok}${fail ? ' · ' + fail + ' falharam' : ''}`, fail ? 'warn' : 'ok');
+    }}, `Aplicar em ${ids.length}`);
     $('modal-actions').append(cancel, apply);
     $('modal').classList.remove('hidden');
+  }
+
+  // ─── Templates library ──────────────────────────────────────────
+  async function loadTemplates() {
+    try {
+      state.templates = await api('/api/templates');
+      renderTemplates();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  function renderTemplates() {
+    const list = $('tpl-list'); list.innerHTML = '';
+    const names = Object.keys(state.templates);
+    $('tpl-counter').textContent = names.length ? `(${names.length})` : '';
+    if (names.length === 0) {
+      list.innerHTML = '<div class="muted small" style="padding:14px;text-align:center">Nenhum template ainda. Crie um aqui ou use "Salvar como Template" ao editar mensagens.</div>';
+      return;
+    }
+    names.forEach(name => {
+      const msgs = state.templates[name] || [];
+      const item = el('div', { class: 'tpl-item' });
+      item.appendChild(el('div', { class: 'tpl-name' }, name));
+      item.appendChild(el('div', { class: 'tpl-count' }, `${msgs.filter(m => m?.trim()).length} mensagens`));
+      item.appendChild(el('button', { class: 'btn ghost sm', onclick: () => editTemplate(name) }, 'Editar'));
+      item.appendChild(el('button', { class: 'btn red-dim sm', onclick: () => deleteTemplate(name) }, 'Apagar'));
+      list.appendChild(item);
+    });
+  }
+
+  function newTemplate() {
+    const name = ($('tpl-name').value || '').trim();
+    if (!name) { toast('Digite um nome para o template', 'warn'); return; }
+    if (state.templates[name]) { toast('Já existe um template com esse nome', 'warn'); return; }
+    state.templates[name] = ['', '', '', ''];
+    saveTemplate(name).then(() => { $('tpl-name').value = ''; editTemplate(name); });
+  }
+
+  async function saveTemplate(name) {
+    try {
+      await api('/api/templates', { method: 'POST', body: { name, messages: state.templates[name] }});
+      renderTemplates();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  function editTemplate(name) {
+    const msgs = state.templates[name] || ['', '', '', ''];
+    $('modal-title').textContent = `Editar template: ${name}`;
+    $('modal-body').innerHTML = `
+      <div class="msg-editor">
+        ${[0,1,2,3].map(i => `
+          <div class="msg-row">
+            <label>Mensagem ${i+1}</label>
+            <textarea data-tpl-idx="${i}">${(msgs[i]||'').replace(/</g,'&lt;')}</textarea>
+          </div>
+        `).join('')}
+        <div class="msg-vars muted small">Variáveis: <code>{nome}</code> <code>{key}</code> <code>{pedido}</code></div>
+      </div>
+    `;
+    $('modal-actions').innerHTML = '';
+    const cancel = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Cancelar');
+    const save = el('button', { class: 'btn green', onclick: async () => {
+      const newMsgs = [0,1,2,3].map(i => document.querySelector(`#modal textarea[data-tpl-idx="${i}"]`).value);
+      state.templates[name] = newMsgs;
+      await saveTemplate(name);
+      $('modal').classList.add('hidden');
+      toast('Template salvo', 'ok');
+    }}, 'Salvar');
+    $('modal-actions').append(cancel, save);
+    $('modal').classList.remove('hidden');
+  }
+
+  async function deleteTemplate(name) {
+    if (!await confirm('Apagar template', `Apagar "${name}"? Não afeta mensagens já atribuídas a produtos.`, 'Apagar', true)) return;
+    try {
+      await api('/api/templates/delete', { method: 'POST', body: { name } });
+      delete state.templates[name];
+      renderTemplates();
+      toast('Template apagado', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
   }
 
   // ─── Orders ─────────────────────────────────────────────────────

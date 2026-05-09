@@ -127,38 +127,44 @@
     <section class="screen hidden" data-screen="mensagens">
       <div class="screen-head">
         <h1>Mensagens</h1>
-        <p class="muted">Templates reutilizáveis e atribuição por produto</p>
+        <p class="muted">Configure mensagens em vários produtos ao mesmo tempo</p>
       </div>
-      <div class="msg-tabs">
-        <button class="tab active" data-tab="templates">Biblioteca de Templates</button>
-        <button class="tab" data-tab="produtos">Por Produto</button>
+      <div class="toolbar">
+        <input class="search" id="msg-search" placeholder="🔍 Buscar produto, anúncio…">
+        <select id="msg-filter">
+          <option value="all">Todos os produtos</option>
+          <option value="enabled">Apenas habilitados</option>
+          <option value="with-msg">Com mensagens</option>
+          <option value="without-msg">Sem mensagens</option>
+        </select>
+        <button class="btn dark" id="btn-loadmsg">↻ Recarregar</button>
+        <span class="muted small" id="msg-count"></span>
       </div>
-      <div class="tab-content active" data-tab="templates">
-        <div class="toolbar">
-          <input class="search" id="tpl-name" placeholder="Nome do template (ex: Sequência padrão)">
-          <button class="btn green" id="btn-newtpl">+ Novo</button>
+
+      <div class="bulk-bar" id="bulk-bar">
+        <label class="bulk-checkall">
+          <input type="checkbox" id="msg-selectall">
+          <span><strong id="msg-selected-count">0</strong> selecionado(s)</span>
+        </label>
+        <div class="bulk-actions">
+          <button class="btn green sm" id="btn-bulk-edit" disabled>✏ Editar Mensagens</button>
+          <button class="btn blue sm" id="btn-bulk-template" disabled>📑 Aplicar Template</button>
+          <button class="btn ghost sm" id="btn-bulk-clear" disabled>Limpar Seleção</button>
         </div>
-        <div id="tpl-list" class="tpl-list"></div>
       </div>
-      <div class="tab-content hidden" data-tab="produtos">
-        <div class="toolbar">
-          <select id="msg-prod-select"><option value="">Selecione um produto…</option></select>
-          <button class="btn dark" id="btn-applytpl">Aplicar Template…</button>
-        </div>
-        <div id="msg-editor" class="msg-editor hidden">
-          <div class="msg-row"><label>Mensagem 1 <span class="muted small">(boas-vindas)</span></label><textarea data-idx="0"></textarea></div>
-          <div class="msg-row"><label>Mensagem 2 <span class="muted small">(produto/instruções)</span></label><textarea data-idx="1"></textarea></div>
-          <div class="msg-row"><label>Mensagem 3 <span class="muted small">(chave/serial — usa {key})</span></label><textarea data-idx="2"></textarea></div>
-          <div class="msg-row"><label>Mensagem 4 <span class="muted small">(despedida)</span></label><textarea data-idx="3"></textarea></div>
-          <div class="msg-actions">
-            <button class="btn green" id="btn-savemsg">💾 Salvar</button>
-            <button class="btn ghost" id="btn-savetpl">📑 Salvar como Template</button>
+
+      <div class="msg-prod-list" id="msg-prod-list"></div>
+
+      <details class="templates-section">
+        <summary>📑 Biblioteca de Templates <span class="muted small" id="tpl-counter"></span></summary>
+        <div class="templates-content">
+          <div class="toolbar" style="margin-top:14px">
+            <input class="search" id="tpl-name" placeholder="Nome do novo template (ex: Sequência padrão)">
+            <button class="btn green sm" id="btn-newtpl">+ Criar</button>
           </div>
-          <div class="msg-vars muted small">
-            Variáveis disponíveis: <code>{nome}</code> nome do comprador · <code>{key}</code> chave configurada do produto · <code>{pedido}</code> ID do pedido
-          </div>
+          <div id="tpl-list" class="tpl-list"></div>
         </div>
-      </div>
+      </details>
     </section>
 
     <section class="screen hidden" data-screen="pedidos">
