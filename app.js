@@ -183,6 +183,20 @@
 
     $('btn-loadprods').addEventListener('click', loadProducts);
     $('prod-search').addEventListener('input', renderProducts);
+    $('prod-filter').addEventListener('change', renderProducts);
+    $('prod-selectall').addEventListener('change', e => {
+      const rows = document.querySelectorAll('#prod-list .prod-row[data-pid]');
+      if (e.target.checked) rows.forEach(r => state.prodSelected.add(r.dataset.pid));
+      else rows.forEach(r => state.prodSelected.delete(r.dataset.pid));
+      renderProducts();
+    });
+    $('btn-bulk-enable').addEventListener('click', () => bulkProdToggle(true));
+    $('btn-bulk-disable').addEventListener('click', () => bulkProdToggle(false));
+    $('btn-bulk-active').addEventListener('click', () => bulkListingStatus('active'));
+    $('btn-bulk-pause').addEventListener('click', () => bulkListingStatus('paused'));
+    $('btn-bulk-stock').addEventListener('click', bulkEditStock);
+    $('btn-bulk-delay').addEventListener('click', bulkEditDelay);
+    $('btn-bulk-clear-prod').addEventListener('click', () => { state.prodSelected.clear(); renderProducts(); });
 
     $('btn-loadords').addEventListener('click', loadOrders);
     $('ord-search').addEventListener('input', renderOrders);
@@ -304,6 +318,9 @@
   }
 
   // ─── Products ───────────────────────────────────────────────────
+  // ─── Products screen — multi-select with bulk actions ───────────
+  state.prodSelected = new Set();
+
   async function loadProducts() {
     $('prod-list').innerHTML = '<div class="muted small" style="padding:24px;text-align:center">Carregando…</div>';
     try {
@@ -314,75 +331,247 @@
 
   function renderProducts() {
     const q = ($('prod-search').value || '').toLowerCase();
-    const filtered = state.products.filter(p =>
-      !q || p.title?.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)
-    );
-    $('prod-count').textContent = `${filtered.length} de ${state.products.length}`;
+    const filter = $('prod-filter').value;
     const list = $('prod-list'); list.innerHTML = '';
+
+    const filtered = state.products.filter(p => {
+      if (q && !`${p.title || ''}${p.id}`.toLowerCase().includes(q)) return false;
+      if (filter === 'enabled' && !p.enabled) return false;
+      if (filter === 'disabled' && p.enabled) return false;
+      if (filter === 'active' && p.listing_status !== 'active') return false;
+      if (filter === 'paused' && p.listing_status !== 'paused') return false;
+      if (filter === 'low' && (typeof p.available_quantity !== 'number' || p.available_quantity > 5)) return false;
+      return true;
+    });
+
+    $('prod-count').textContent = `${filtered.length} de ${state.products.length}`;
+
     if (filtered.length === 0) {
-      list.innerHTML = '<div class="muted small" style="padding:24px;text-align:center">Nenhum produto. Clique em Carregar.</div>';
+      list.innerHTML = '<div class="muted small" style="padding:24px;text-align:center">Nenhum produto corresponde aos filtros.</div>';
+      updateProdBulkBar();
       return;
     }
+
     filtered.forEach(p => list.appendChild(productCard(p)));
+    updateProdBulkBar();
   }
 
   function productCard(p) {
-    const card = el('div', { class: 'prod-item' + (p.enabled ? ' enabled' : '') });
-    const toggle = el('button', { class: 'prod-toggle' + (p.enabled ? ' on' : '') });
-    toggle.onclick = () => toggleProduct(p, !p.enabled);
-    const info = el('div', { class: 'prod-info' });
-    info.appendChild(el('div', { class: 'prod-title' }, p.title || p.id));
-    const meta = el('div', { class: 'prod-meta' });
-    meta.appendChild(el('span', {}, `ID: ${p.id}`));
-    meta.appendChild(el('span', {}, `Estoque: ${p.available_quantity}`));
-    meta.appendChild(el('span', { class: 'prod-status ' + (p.listing_status === 'active' ? 'active' : 'paused') },
-      p.listing_status === 'active' ? '● Ativo' : '⏸ Pausado'));
-    if (p.product_key) meta.appendChild(el('span', {}, `Chave: ${p.product_key}`));
-    meta.appendChild(el('span', {}, `Delay: ${p.delay_min}-${p.delay_max}s`));
+    const row = el('div', { class: 'msg-prod-row prod-row' + (p.enabled ? ' enabled' : '') + (state.prodSelected.has(p.id) ? ' selected' : ''), 'data-pid': p.id });
+
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = state.prodSelected.has(p.id);
+    cb.onchange = e => {
+      e.stopPropagation();
+      if (cb.checked) state.prodSelected.add(p.id); else state.prodSelected.delete(p.id);
+      row.classList.toggle('selected', cb.checked);
+      updateProdBulkBar();
+    };
+
+    const toggle = el('button', {
+      class: 'prod-toggle' + (p.enabled ? ' on' : ''),
+      title: p.enabled ? 'Habilitado no app — clique pra desabilitar' : 'Desabilitado — clique pra habilitar'
+    });
+    toggle.onclick = e => { e.stopPropagation(); toggleProduct(p, !p.enabled); };
+
+    const info = el('div', { class: 'msg-prod-info' });
+    info.appendChild(el('div', { class: 'msg-prod-title' }, p.title || p.id));
+    const meta = el('div', { class: 'msg-prod-meta' });
+    meta.appendChild(el('span', {}, p.id));
+    meta.appendChild(el('span', { class: 'tag ' + (p.listing_status === 'active' ? 'done' : 'pending') },
+      p.listing_status === 'active' ? '● Ativo no ML' : '⏸ Pausado no ML'));
+    const stockClass = (typeof p.available_quantity === 'number' && p.available_quantity <= 5) ? 'tag fail' : '';
+    meta.appendChild(el('span', { class: stockClass }, `📦 ${p.available_quantity}`));
+    if (p.product_key) meta.appendChild(el('span', {}, `🔑 ${p.product_key}`));
+    meta.appendChild(el('span', {}, `⏱ ${p.delay_min}-${p.delay_max}s`));
     info.appendChild(meta);
-    const actions = el('div', { class: 'prod-actions' });
-    actions.appendChild(el('button', { class: 'btn ghost sm', onclick: () => editProduct(p) }, '⚙'));
-    card.append(toggle, info, actions);
-    return card;
+
+    const editBtn = el('button', { class: 'btn ghost sm', onclick: e => { e.stopPropagation(); editProduct(p); }, title: 'Configurar' }, '⚙');
+
+    row.addEventListener('click', () => cb.click());
+    row.append(cb, toggle, info, editBtn);
+    return row;
+  }
+
+  function updateProdBulkBar() {
+    const n = state.prodSelected.size;
+    $('prod-selected-count').textContent = n;
+    const has = n > 0;
+    ['btn-bulk-enable','btn-bulk-disable','btn-bulk-active','btn-bulk-pause','btn-bulk-stock','btn-bulk-delay','btn-bulk-clear-prod']
+      .forEach(id => $(id).disabled = !has);
+    const visibleIds = Array.from(document.querySelectorAll('#prod-list .prod-row[data-pid]'));
+    const allChecked = visibleIds.length > 0 && visibleIds.every(r => state.prodSelected.has(r.dataset.pid));
+    const anyChecked = visibleIds.some(r => state.prodSelected.has(r.dataset.pid));
+    const sa = $('prod-selectall');
+    sa.checked = allChecked;
+    sa.indeterminate = anyChecked && !allChecked;
   }
 
   async function toggleProduct(p, enabled) {
     try {
       await api('/api/product', { method: 'POST', body: {
         item_id: p.id, enabled, product_key: p.product_key || '',
-        delay_min: p.delay_min || 15, delay_max: p.delay_max || 90
+        delay_min: p.delay_min || 15, delay_max: p.delay_max || 45
       }});
       p.enabled = enabled;
       renderProducts();
-      toast(`${enabled ? 'Habilitado' : 'Desabilitado'}: ${p.title?.slice(0, 40)}`, 'ok');
+      toast(`${enabled ? '✓ Habilitado' : '✗ Desabilitado'}: ${(p.title || p.id).slice(0, 40)}`, 'ok');
     } catch (e) { toast(e.message, 'err'); }
   }
 
   async function editProduct(p) {
     $('modal-title').textContent = 'Configurar Produto';
     $('modal-body').innerHTML = `
+      <div class="muted small" style="margin-bottom:12px">${p.title || p.id}</div>
       <div class="form-grid">
-        <label>Chave/Serial (opcional)<input id="m-key" value="${p.product_key || ''}" placeholder="Ex: ABC123-XYZ"></label>
+        <label>Chave/Serial <span class="muted small">(usada na variável {key})</span><input id="m-key" value="${(p.product_key || '').replace(/"/g,'&quot;')}" placeholder="Ex: ABC123-XYZ"></label>
+        <label>Estoque atual<input id="m-stock" type="number" value="${typeof p.available_quantity === 'number' ? p.available_quantity : 0}" min="0"></label>
         <label>Delay mínimo (segundos)<input type="number" id="m-min" value="${p.delay_min || 15}" min="1"></label>
-        <label>Delay máximo (segundos)<input type="number" id="m-max" value="${p.delay_max || 90}" min="1"></label>
+        <label>Delay máximo (segundos)<input type="number" id="m-max" value="${p.delay_max || 45}" min="1"></label>
       </div>
     `;
     $('modal-actions').innerHTML = '';
     const cancel = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Cancelar');
     const save = el('button', { class: 'btn blue', onclick: async () => {
+      const newStock = parseInt($('m-stock').value);
       const data = { item_id: p.id, enabled: p.enabled,
         product_key: $('m-key').value.trim(),
         delay_min: parseInt($('m-min').value) || 15,
-        delay_max: parseInt($('m-max').value) || 90 };
+        delay_max: parseInt($('m-max').value) || 45 };
+      save.disabled = true; save.textContent = 'Salvando…';
       try {
         await api('/api/product', { method: 'POST', body: data });
+        // If stock changed, also update on ML
+        if (typeof p.available_quantity === 'number' && newStock !== p.available_quantity) {
+          try {
+            await api('/api/add_stock', { method: 'POST', body: { item_id: p.id, quantity: newStock }});
+            p.available_quantity = newStock;
+          } catch (e) { toast('Estoque ML: ' + e.message, 'warn'); }
+        }
         Object.assign(p, data);
         renderProducts();
         $('modal').classList.add('hidden');
         toast('Atualizado', 'ok');
-      } catch (e) { toast(e.message, 'err'); }
+      } catch (e) { toast(e.message, 'err'); save.disabled = false; save.textContent = 'Salvar'; }
     }}, 'Salvar');
     $('modal-actions').append(cancel, save);
+    $('modal').classList.remove('hidden');
+  }
+
+  // ─── Bulk product actions ───────────────────────────────────────
+  async function bulkProdToggle(enable) {
+    const ids = Array.from(state.prodSelected);
+    if (!ids.length) return;
+    const verb = enable ? 'habilitar' : 'desabilitar';
+    if (!await confirm(`${verb.charAt(0).toUpperCase() + verb.slice(1)} ${ids.length} produto(s)`,
+      `Vai ${verb} ${ids.length} produto(s) no app (não afeta o anúncio no ML).`, verb.charAt(0).toUpperCase() + verb.slice(1))) return;
+    let ok = 0, fail = 0;
+    for (const id of ids) {
+      const p = state.products.find(x => x.id === id); if (!p) continue;
+      try {
+        await api('/api/product', { method: 'POST', body: {
+          item_id: id, enabled: enable,
+          product_key: p.product_key || '',
+          delay_min: p.delay_min || 15, delay_max: p.delay_max || 45
+        }});
+        p.enabled = enable; ok++;
+      } catch { fail++; }
+    }
+    state.prodSelected.clear();
+    renderProducts();
+    toast(`${enable ? '✓' : '✗'} ${ok} ${verb} no app${fail ? ' · ' + fail + ' falharam' : ''}`, fail ? 'warn' : 'ok');
+  }
+
+  async function bulkListingStatus(status) {
+    const ids = Array.from(state.prodSelected);
+    if (!ids.length) return;
+    const verb = status === 'active' ? 'ativar no Mercado Livre' : 'pausar no Mercado Livre';
+    if (!await confirm(`${verb.charAt(0).toUpperCase() + verb.slice(1)}`,
+      `Vai ${verb} ${ids.length} anúncio(s). Isso afeta a visibilidade no ML.`,
+      status === 'active' ? 'Ativar' : 'Pausar', status === 'paused')) return;
+    let ok = 0, fail = 0;
+    for (const id of ids) {
+      try {
+        await api('/api/toggle_listing', { method: 'POST', body: { item_id: id, status }});
+        const p = state.products.find(x => x.id === id);
+        if (p) p.listing_status = status;
+        ok++;
+      } catch { fail++; }
+    }
+    state.prodSelected.clear();
+    renderProducts();
+    toast(`${ok} anúncio(s) ${status === 'active' ? 'ativado(s)' : 'pausado(s)'}${fail ? ' · ' + fail + ' falharam' : ''}`, fail ? 'warn' : 'ok');
+  }
+
+  function bulkEditStock() {
+    const ids = Array.from(state.prodSelected);
+    if (!ids.length) return;
+    $('modal-title').textContent = `Ajustar Estoque (${ids.length} produto(s))`;
+    $('modal-body').innerHTML = `
+      <div class="muted small" style="margin-bottom:12px">Define um novo estoque <strong>absoluto</strong> para os produtos selecionados.</div>
+      <div class="form-grid">
+        <label>Novo estoque<input type="number" id="bulk-stock" value="0" min="0"></label>
+      </div>
+    `;
+    $('modal-actions').innerHTML = '';
+    const cancel = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Cancelar');
+    const apply = el('button', { class: 'btn blue', onclick: async () => {
+      const qty = parseInt($('bulk-stock').value);
+      if (isNaN(qty) || qty < 0) { toast('Quantidade inválida', 'warn'); return; }
+      apply.disabled = true; apply.textContent = 'Atualizando…';
+      let ok = 0, fail = 0;
+      for (const id of ids) {
+        try {
+          await api('/api/add_stock', { method: 'POST', body: { item_id: id, quantity: qty }});
+          const p = state.products.find(x => x.id === id);
+          if (p) p.available_quantity = qty;
+          ok++;
+        } catch { fail++; }
+      }
+      $('modal').classList.add('hidden');
+      state.prodSelected.clear();
+      renderProducts();
+      toast(`Estoque atualizado em ${ok}${fail ? ' · ' + fail + ' falharam' : ''}`, fail ? 'warn' : 'ok');
+    }}, 'Aplicar');
+    $('modal-actions').append(cancel, apply);
+    $('modal').classList.remove('hidden');
+  }
+
+  function bulkEditDelay() {
+    const ids = Array.from(state.prodSelected);
+    if (!ids.length) return;
+    $('modal-title').textContent = `Ajustar Delay (${ids.length} produto(s))`;
+    $('modal-body').innerHTML = `
+      <div class="muted small" style="margin-bottom:12px">Recomendação: <strong>15-45s</strong> ou <strong>30-90s</strong> para evitar moderação automática do ML.</div>
+      <div class="form-grid">
+        <label>Delay mínimo (segundos)<input type="number" id="bulk-min" value="15" min="1"></label>
+        <label>Delay máximo (segundos)<input type="number" id="bulk-max" value="45" min="1"></label>
+      </div>
+    `;
+    $('modal-actions').innerHTML = '';
+    const cancel = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Cancelar');
+    const apply = el('button', { class: 'btn blue', onclick: async () => {
+      const dmin = parseInt($('bulk-min').value) || 15;
+      const dmax = parseInt($('bulk-max').value) || 45;
+      apply.disabled = true; apply.textContent = 'Atualizando…';
+      let ok = 0, fail = 0;
+      for (const id of ids) {
+        const p = state.products.find(x => x.id === id); if (!p) continue;
+        try {
+          await api('/api/product', { method: 'POST', body: {
+            item_id: id, enabled: p.enabled,
+            product_key: p.product_key || '',
+            delay_min: dmin, delay_max: dmax
+          }});
+          p.delay_min = dmin; p.delay_max = dmax; ok++;
+        } catch { fail++; }
+      }
+      $('modal').classList.add('hidden');
+      state.prodSelected.clear();
+      renderProducts();
+      toast(`Delay atualizado em ${ok}${fail ? ' · ' + fail + ' falharam' : ''}`, fail ? 'warn' : 'ok');
+    }}, 'Aplicar');
+    $('modal-actions').append(cancel, apply);
     $('modal').classList.remove('hidden');
   }
 

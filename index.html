@@ -114,13 +114,38 @@
     <section class="screen hidden" data-screen="produtos">
       <div class="screen-head">
         <h1>Produtos</h1>
-        <p class="muted">Habilite produtos e configure delays</p>
+        <p class="muted">Gerencie seus anúncios do Mercado Livre</p>
       </div>
       <div class="toolbar">
-        <input class="search" id="prod-search" placeholder="🔍 Buscar produto…">
+        <input class="search" id="prod-search" placeholder="🔍 Buscar produto, ID…">
+        <select id="prod-filter">
+          <option value="all">Todos os produtos</option>
+          <option value="enabled">Habilitados no app</option>
+          <option value="disabled">Desabilitados no app</option>
+          <option value="active">Anúncios ativos</option>
+          <option value="paused">Anúncios pausados</option>
+          <option value="low">Estoque baixo (≤5)</option>
+        </select>
         <button class="btn dark" id="btn-loadprods">↻ Carregar</button>
         <span class="muted small" id="prod-count"></span>
       </div>
+
+      <div class="bulk-bar" id="prod-bulk-bar">
+        <label class="bulk-checkall">
+          <input type="checkbox" id="prod-selectall">
+          <span><strong id="prod-selected-count">0</strong> selecionado(s)</span>
+        </label>
+        <div class="bulk-actions">
+          <button class="btn green sm" id="btn-bulk-enable" disabled>✓ Habilitar no app</button>
+          <button class="btn ghost sm" id="btn-bulk-disable" disabled>✗ Desabilitar</button>
+          <button class="btn dark sm" id="btn-bulk-active" disabled>▶ Ativar no ML</button>
+          <button class="btn warn sm" id="btn-bulk-pause" disabled>⏸ Pausar no ML</button>
+          <button class="btn dark sm" id="btn-bulk-stock" disabled>📦 Ajustar Estoque</button>
+          <button class="btn dark sm" id="btn-bulk-delay" disabled>⏱ Ajustar Delay</button>
+          <button class="btn ghost sm" id="btn-bulk-clear-prod" disabled>Limpar Seleção</button>
+        </div>
+      </div>
+
       <div class="prod-list" id="prod-list"></div>
     </section>
 
