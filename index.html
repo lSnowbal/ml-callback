@@ -45,6 +45,7 @@
       <button class="nav-btn" data-screen="pedidos"><span class="nav-icon">⊙</span><span>Pedidos</span></button>
       <button class="nav-btn" data-screen="falhas"><span class="nav-icon">⚠</span><span>Falhas</span></button>
       <button class="nav-btn" data-screen="estatisticas"><span class="nav-icon">📊</span><span>Estatísticas</span></button>
+      <button class="nav-btn" data-screen="broadcast"><span class="nav-icon">📢</span><span>Broadcast</span></button>
       <button class="nav-btn" data-screen="teste"><span class="nav-icon">🧪</span><span>Modo Teste</span></button>
       <button class="nav-btn" data-screen="config"><span class="nav-icon">⚙</span><span>Configurações</span></button>
     </nav>
@@ -205,6 +206,13 @@
           <option value="sending">Enviando</option>
           <option value="done">Concluídos</option>
         </select>
+        <select id="ord-date-filter">
+          <option value="all">Qualquer data</option>
+          <option value="today">Hoje</option>
+          <option value="yesterday">Ontem</option>
+          <option value="week">Últimos 7 dias</option>
+          <option value="month">Últimos 30 dias</option>
+        </select>
         <button class="btn dark" id="btn-loadords">↻ Atualizar</button>
         <button class="btn ghost" id="btn-export">⬇ CSV</button>
       </div>
@@ -261,6 +269,67 @@
       </div>
     </section>
 
+    <section class="screen hidden" data-screen="broadcast">
+      <div class="screen-head">
+        <h1>Broadcast</h1>
+        <p class="muted">Envie mensagens em massa para compradores recentes de produtos selecionados</p>
+      </div>
+
+      <div class="block">
+        <div class="block-head"><h2>1. Selecione produto(s)</h2></div>
+        <div class="toolbar">
+          <input class="search" id="bc-search" placeholder="🔍 Buscar produto…">
+          <select id="bc-days">
+            <option value="7">Últimos 7 dias</option>
+            <option value="15">Últimos 15 dias</option>
+            <option value="30" selected>Últimos 30 dias</option>
+            <option value="60">Últimos 60 dias</option>
+            <option value="90">Últimos 90 dias</option>
+          </select>
+          <button class="btn dark" id="btn-bc-search">🔎 Buscar compradores</button>
+        </div>
+        <div id="bc-prod-list" class="msg-prod-list" style="margin-top:8px"></div>
+      </div>
+
+      <div class="block hidden" id="bc-recipients-block">
+        <div class="block-head">
+          <h2>2. Selecione destinatários</h2>
+          <span class="muted small" id="bc-recipients-count"></span>
+        </div>
+        <div class="toolbar">
+          <label class="bulk-checkall"><input type="checkbox" id="bc-selectall"><span>Selecionar todos</span></label>
+          <input class="search" id="bc-recipients-search" placeholder="🔍 Filtrar por nome/ID…">
+        </div>
+        <div id="bc-recipients-list" class="msg-prod-list"></div>
+      </div>
+
+      <div class="block hidden" id="bc-compose-block">
+        <div class="block-head"><h2>3. Componha a mensagem</h2></div>
+        <div class="form-grid">
+          <label>Mensagem <span class="muted small">(máx 350 caracteres, variáveis: {nome}, {pedido})</span>
+            <textarea id="bc-text" maxlength="350" placeholder="Olá {nome}! Atualização importante sobre o produto que você comprou..."></textarea>
+            <span class="muted small" id="bc-charcount">0 / 350</span>
+          </label>
+          <div style="display:flex;gap:8px;align-items:end">
+            <label style="flex:1">Delay mínimo (s)<input type="number" id="bc-delay-min" value="15" min="5"></label>
+            <label style="flex:1">Delay máximo (s)<input type="number" id="bc-delay-max" value="45" min="5"></label>
+          </div>
+          <div class="msg-vars">
+            <div class="muted small" style="margin-bottom:8px"><strong>⚠ Importante:</strong> mensagens serão enviadas com delay aleatório entre os limites configurados. Mensagens só são entregues se o chat estiver aberto (cliente já interagiu). Os bloqueados aparecerão como "skipped".</div>
+            <button class="btn red" id="btn-bc-send">📢 Enviar Broadcast</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="block hidden" id="bc-progress-block">
+        <div class="block-head">
+          <h2>4. Progresso</h2>
+          <button class="btn ghost sm" id="btn-bc-refresh">↻ Atualizar</button>
+        </div>
+        <div id="bc-progress"></div>
+      </div>
+    </section>
+
     <section class="screen hidden" data-screen="teste">
       <div class="screen-head">
         <h1>Modo Teste</h1>
@@ -287,24 +356,109 @@
     <section class="screen hidden" data-screen="config">
       <div class="screen-head">
         <h1>Configurações</h1>
-        <p class="muted">Credenciais e preferências do sistema</p>
+        <p class="muted">Credenciais, contas, preferências e ferramentas</p>
       </div>
+
+      <!-- Multi-account selector -->
       <div class="block">
-        <div class="block-head"><h2>Credenciais Mercado Livre</h2></div>
-        <div class="form-grid">
-          <label>Access Token<input id="cfg-access"></label>
-          <label>Refresh Token<input id="cfg-refresh"></label>
-          <label>Client ID<input id="cfg-cid"></label>
-          <label>Client Secret<input type="password" id="cfg-cs"></label>
-          <label>Seller ID<input id="cfg-seller"></label>
-          <button class="btn blue" id="btn-savecreds">💾 Salvar no Worker</button>
+        <div class="block-head">
+          <h2>Conta ativa do Mercado Livre</h2>
+          <button class="btn green sm" id="btn-save-account">+ Salvar conta atual</button>
+        </div>
+        <p class="muted small">Salve múltiplas contas e alterne entre elas com um clique.</p>
+        <div id="accounts-list" style="margin-top:12px"></div>
+      </div>
+
+      <!-- Health -->
+      <div class="block">
+        <div class="block-head">
+          <h2>Saúde do Sistema</h2>
+          <button class="btn ghost sm" id="btn-health-refresh">↻ Atualizar</button>
+        </div>
+        <div id="health-info" class="info-grid"></div>
+      </div>
+
+      <!-- Vacation mode -->
+      <div class="block">
+        <div class="block-head"><h2>Modo Férias</h2></div>
+        <p class="muted small">Pausa o monitoramento até a data escolhida. Ao chegar a data, reativa automaticamente.</p>
+        <div class="form-grid" style="margin-top:10px">
+          <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+            <label style="flex:1;min-width:200px">Pausar até<input type="datetime-local" id="vac-until"></label>
+            <button class="btn warn" id="btn-vacation-on">⏸ Ativar Férias</button>
+            <button class="btn ghost" id="btn-vacation-off">▶ Cancelar Férias</button>
+          </div>
+        </div>
+        <div id="vacation-status" class="muted small" style="margin-top:8px"></div>
+      </div>
+
+      <!-- Notifications -->
+      <div class="block">
+        <div class="block-head"><h2>Notificações</h2></div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <label style="display:flex;gap:10px;align-items:center;cursor:pointer">
+            <input type="checkbox" id="notify-sound" style="width:18px;height:18px;accent-color:var(--accent-2)">
+            <span>🔊 <strong>Som ao detectar venda nova</strong> <span class="muted small">(quando a aba está aberta)</span></span>
+          </label>
+          <label style="display:flex;gap:10px;align-items:center;cursor:pointer">
+            <input type="checkbox" id="notify-push" style="width:18px;height:18px;accent-color:var(--accent-2)">
+            <span>🔔 <strong>Notificação do navegador</strong> <span class="muted small">(funciona mesmo com aba minimizada — clique abaixo para conceder permissão)</span></span>
+          </label>
+          <button class="btn dark sm" id="btn-notify-test" style="align-self:flex-start">🧪 Testar notificação</button>
         </div>
       </div>
+
+      <!-- Theme -->
       <div class="block">
-        <div class="block-head"><h2>OAuth Mercado Livre</h2></div>
-        <p class="muted small">Renovar autorização (uma vez a cada 6 meses, automaticamente entre essas vezes)</p>
-        <a id="oauth-link" href="#" class="btn dark">🔑 Renovar autorização</a>
+        <div class="block-head"><h2>Aparência</h2></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span>Tema:</span>
+          <button class="btn ghost sm" data-theme-set="dark">🌙 Escuro</button>
+          <button class="btn ghost sm" data-theme-set="light">☀ Claro</button>
+          <span style="margin-left:20px">Cor de destaque:</span>
+          <div id="accent-picker" style="display:flex;gap:6px"></div>
+        </div>
       </div>
+
+      <!-- Backup/Restore -->
+      <div class="block">
+        <div class="block-head"><h2>Backup e Restauração</h2></div>
+        <p class="muted small">Exporte todos os dados (produtos, mensagens, templates, histórico) ou restaure de um backup anterior.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="btn dark" id="btn-backup-export">⬇ Exportar backup</button>
+          <button class="btn ghost" id="btn-backup-import">⬆ Importar backup</button>
+          <input type="file" id="backup-file" accept=".json" hidden>
+        </div>
+      </div>
+
+      <!-- Manual Credentials (advanced) -->
+      <details class="templates-section">
+        <summary>🔧 Credenciais avançadas (manual)</summary>
+        <div class="templates-content">
+          <p class="muted small" style="margin-bottom:12px">Use isso apenas se precisar editar credenciais manualmente. Em geral, use a aba <strong>OAuth</strong> abaixo.</p>
+          <div class="form-grid">
+            <label>Access Token<input id="cfg-access"></label>
+            <label>Refresh Token<input id="cfg-refresh"></label>
+            <label>Client ID<input id="cfg-cid"></label>
+            <label>Client Secret<input type="password" id="cfg-cs"></label>
+            <label>Seller ID<input id="cfg-seller"></label>
+            <button class="btn blue" id="btn-savecreds">💾 Salvar no Worker</button>
+          </div>
+        </div>
+      </details>
+
+      <!-- OAuth integrated -->
+      <div class="block">
+        <div class="block-head"><h2>OAuth Mercado Livre (integrado)</h2></div>
+        <p class="muted small">Renovar autorização do ML. O processo é automático: clique no botão, autorize no ML, e os tokens são salvos sozinhos.</p>
+        <div class="form-grid" style="margin-top:10px">
+          <label>Client ID<input id="oauth-cid" placeholder="Ex: 8667328126564277"></label>
+          <label>Client Secret<input type="password" id="oauth-cs" placeholder="Cole o Client Secret do DevCenter"></label>
+          <button class="btn green" id="btn-oauth-start">🔑 Iniciar autorização</button>
+        </div>
+        <div id="oauth-result" style="margin-top:10px"></div>
+      </div>
+
       <div class="block">
         <div class="block-head"><h2>Sobre o Sistema</h2></div>
         <div class="info-grid">

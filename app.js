@@ -123,8 +123,15 @@
     setupActions();
     setupKeyboard();
     setupSidebar();
+    wireSettingsHandlers();
     refresh();
     state.pollHandle = setInterval(refresh, 15000); // every 15s
+    startEventPolling();
+    // Apply saved accent color
+    const savedAccent = localStorage.getItem('mlas_accent');
+    if (savedAccent) document.documentElement.style.setProperty('--accent', savedAccent);
+    // Handle OAuth return
+    handleOAuthCallback();
   }
 
   // ─── Theme ──────────────────────────────────────────────────────
@@ -155,6 +162,8 @@
     if (name === 'pedidos') loadOrders();
     if (name === 'falhas') loadFails();
     if (name === 'mensagens') { loadTemplates(); loadMessagesScreen(); }
+    if (name === 'broadcast') initBroadcast();
+    if (name === 'config') initSettings();
     if (name === 'estatisticas') renderStats();
   }
 
@@ -201,6 +210,7 @@
     $('btn-loadords').addEventListener('click', loadOrders);
     $('ord-search').addEventListener('input', renderOrders);
     $('ord-filter').addEventListener('change', renderOrders);
+    $('ord-date-filter').addEventListener('change', renderOrders);
     $('btn-export').addEventListener('click', exportOrdersCSV);
 
     $('btn-loadfail').addEventListener('click', loadFails);
@@ -957,13 +967,29 @@
   function renderOrders() {
     const q = ($('ord-search').value || '').toLowerCase();
     const filter = $('ord-filter').value;
+    const dateFilter = $('ord-date-filter')?.value || 'all';
     const tbody = document.querySelector('#ord-table tbody');
     tbody.innerHTML = '';
+
+    // Compute date boundary
+    let cutoff = 0;
+    const now = new Date();
+    if (dateFilter === 'today') { const d=new Date(now); d.setHours(0,0,0,0); cutoff=d.getTime(); }
+    else if (dateFilter === 'yesterday') { const d=new Date(now); d.setDate(d.getDate()-1); d.setHours(0,0,0,0); cutoff=d.getTime(); }
+    else if (dateFilter === 'week') cutoff = now.getTime() - 7*86400000;
+    else if (dateFilter === 'month') cutoff = now.getTime() - 30*86400000;
+    let cutoffEnd = Infinity;
+    if (dateFilter === 'yesterday') { const d=new Date(now); d.setHours(0,0,0,0); cutoffEnd=d.getTime(); }
+
     let filtered = state.orders.filter(o => {
       if (q && !`${o.order_id}${o.buyer}${o.item_id}`.toLowerCase().includes(q)) return false;
-      if (filter === 'pending') return (o.msgs_sent || 0) === 0 && !o.confirmed;
-      if (filter === 'sending') return (o.msgs_sent || 0) > 0 && !o.confirmed;
-      if (filter === 'done') return o.confirmed;
+      if (filter === 'pending' && !((o.msgs_sent || 0) === 0 && !o.confirmed)) return false;
+      if (filter === 'sending' && !((o.msgs_sent || 0) > 0 && !o.confirmed)) return false;
+      if (filter === 'done' && !o.confirmed) return false;
+      if (cutoff && o.created_at) {
+        const t = new Date(o.created_at).getTime();
+        if (t < cutoff || t >= cutoffEnd) return false;
+      }
       return true;
     });
     if (filtered.length === 0) {
@@ -1180,6 +1206,501 @@
       $('modal-actions').appendChild(ok);
       $('modal').classList.remove('hidden');
     }, 800);
+  }
+
+  // ─── Broadcast — mass messaging ─────────────────────────────────
+  state.bcSelectedProducts = new Set();
+  state.bcRecipients = [];
+  state.bcSelectedRecipients = new Set();
+  state.bcCurrentJobId = null;
+
+  async function initBroadcast() {
+    // Make sure products are loaded
+    if (!state.products.length) {
+      try { state.products = await api('/api/products'); } catch (e) { toast(e.message, 'err'); }
+    }
+    renderBcProducts();
+  }
+
+  function renderBcProducts() {
+    const q = ($('bc-search').value || '').toLowerCase();
+    const list = $('bc-prod-list');
+    list.innerHTML = '';
+    const filtered = state.products.filter(p =>
+      !q || `${p.title || ''}${p.id}`.toLowerCase().includes(q)
+    );
+    if (!filtered.length) {
+      list.innerHTML = '<div class="muted small" style="padding:20px;text-align:center">Nenhum produto.</div>';
+      return;
+    }
+    filtered.forEach(p => {
+      const selected = state.bcSelectedProducts.has(p.id);
+      const row = el('div', { class: 'msg-prod-row' + (selected ? ' selected' : ''), 'data-pid': p.id });
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = selected;
+      cb.onchange = e => {
+        e.stopPropagation();
+        if (cb.checked) state.bcSelectedProducts.add(p.id);
+        else state.bcSelectedProducts.delete(p.id);
+        row.classList.toggle('selected', cb.checked);
+      };
+      const info = el('div', { class: 'msg-prod-info' });
+      info.appendChild(el('div', { class: 'msg-prod-title' }, p.title || p.id));
+      info.appendChild(el('div', { class: 'msg-prod-meta' }, el('span', {}, p.id)));
+      row.addEventListener('click', () => cb.click());
+      // Empty 2nd column for grid consistency
+      row.append(cb, el('span', {}), info);
+      list.appendChild(row);
+    });
+  }
+
+  async function bcSearchBuyers() {
+    if (!state.bcSelectedProducts.size) {
+      toast('Selecione pelo menos 1 produto', 'warn'); return;
+    }
+    const days = $('bc-days').value;
+    const itemIds = Array.from(state.bcSelectedProducts).join(',');
+    const btn = $('btn-bc-search'); btn.disabled = true; btn.textContent = 'Buscando…';
+    try {
+      const r = await api(`/api/broadcast/buyers?item_ids=${encodeURIComponent(itemIds)}&days=${days}`);
+      state.bcRecipients = r.buyers || [];
+      state.bcSelectedRecipients = new Set(state.bcRecipients.map(b => b.order_id));
+      renderBcRecipients();
+      $('bc-recipients-block').classList.remove('hidden');
+      $('bc-compose-block').classList.remove('hidden');
+      toast(`Encontrados ${r.total} compradores`, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    finally { btn.disabled = false; btn.textContent = '🔎 Buscar compradores'; }
+  }
+
+  function renderBcRecipients() {
+    const q = ($('bc-recipients-search').value || '').toLowerCase();
+    const list = $('bc-recipients-list');
+    list.innerHTML = '';
+    const filtered = state.bcRecipients.filter(r =>
+      !q || `${r.buyer || ''}${r.order_id}${r.item_title || ''}`.toLowerCase().includes(q)
+    );
+    $('bc-recipients-count').textContent = `${state.bcSelectedRecipients.size} / ${filtered.length} selecionado(s)`;
+    if (!filtered.length) {
+      list.innerHTML = '<div class="muted small" style="padding:20px;text-align:center">Nenhum comprador encontrado nesse período.</div>';
+      return;
+    }
+    filtered.forEach(r => {
+      const sel = state.bcSelectedRecipients.has(r.order_id);
+      const row = el('div', { class: 'msg-prod-row' + (sel ? ' selected' : ''), 'data-pid': r.order_id });
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = sel;
+      cb.onchange = e => {
+        e.stopPropagation();
+        if (cb.checked) state.bcSelectedRecipients.add(r.order_id);
+        else state.bcSelectedRecipients.delete(r.order_id);
+        row.classList.toggle('selected', cb.checked);
+        $('bc-recipients-count').textContent = `${state.bcSelectedRecipients.size} / ${state.bcRecipients.length} selecionado(s)`;
+      };
+      const info = el('div', { class: 'msg-prod-info' });
+      info.appendChild(el('div', { class: 'msg-prod-title' }, r.buyer || r.order_id));
+      const meta = el('div', { class: 'msg-prod-meta' });
+      meta.appendChild(el('span', {}, `Pedido: ${r.order_id}`));
+      meta.appendChild(el('span', {}, formatDate(r.date_created)));
+      if (r.item_title) meta.appendChild(el('span', {}, r.item_title.slice(0, 40)));
+      info.appendChild(meta);
+      row.addEventListener('click', () => cb.click());
+      row.append(cb, el('span', {}), info);
+      list.appendChild(row);
+    });
+  }
+
+  async function bcSendBroadcast() {
+    const text = ($('bc-text').value || '').trim();
+    if (!text) { toast('Digite a mensagem', 'warn'); return; }
+    const dmin = parseInt($('bc-delay-min').value) || 15;
+    const dmax = parseInt($('bc-delay-max').value) || 45;
+    const recipients = state.bcRecipients.filter(r => state.bcSelectedRecipients.has(r.order_id));
+    if (!recipients.length) { toast('Selecione pelo menos 1 destinatário', 'warn'); return; }
+
+    if (!await confirm('Confirmar Broadcast',
+      `Enviar essa mensagem para ${recipients.length} comprador(es)?\n\nMensagens serão espaçadas em ${dmin}-${dmax}s. Pode levar vários minutos.`,
+      'Enviar', false)) return;
+
+    try {
+      const r = await api('/api/broadcast/send', { method: 'POST', body: {
+        recipients, text, delay_min: dmin, delay_max: dmax
+      }});
+      state.bcCurrentJobId = r.job_id;
+      $('bc-progress-block').classList.remove('hidden');
+      toast('Broadcast iniciado em background', 'ok');
+      pollBcStatus();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function pollBcStatus() {
+    if (!state.bcCurrentJobId) return;
+    try {
+      const job = await api(`/api/broadcast/status?id=${state.bcCurrentJobId}`);
+      renderBcProgress(job);
+      if (job.status === 'in_progress') {
+        setTimeout(pollBcStatus, 3000);
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  function renderBcProgress(job) {
+    const cont = $('bc-progress');
+    const progress = job.total ? Math.round((job.sent + job.failed + job.skipped) / job.total * 100) : 0;
+    cont.innerHTML = `
+      <div class="info-grid">
+        <div><span class="muted">Status:</span> <strong>${
+          job.status === 'done' ? '✓ Concluído' :
+          job.status === 'in_progress' ? '⏳ Em progresso' :
+          job.status === 'paused_time_limit' ? '⏸ Pausado (limite de tempo)' : job.status
+        }</strong></div>
+        <div><span class="muted">Enviadas:</span> <strong style="color:var(--accent)">${job.sent}</strong> / ${job.total}</div>
+        <div><span class="muted">Falhas:</span> <strong style="color:var(--danger)">${job.failed}</strong></div>
+        <div><span class="muted">Skipped (chat fechado):</span> <strong style="color:var(--warning)">${job.skipped}</strong></div>
+        <div><span class="muted">Progresso:</span> ${progress}%</div>
+      </div>
+      <div style="margin-top:10px;background:var(--surface-2);border-radius:8px;height:8px;overflow:hidden">
+        <div style="height:100%;width:${progress}%;background:var(--accent);transition:width .3s"></div>
+      </div>
+    `;
+    if (job.details && job.details.length) {
+      const detList = el('div', { class: 'log', style: 'margin-top:14px;max-height:200px' });
+      job.details.slice(-30).reverse().forEach(d => {
+        const icon = d.result === 'sent' ? '✅' : d.result === 'failed' ? '❌' : d.result === 'chat_unavailable' ? '🚫' : '⚠';
+        const line = el('div', { class: 'log-line' + (d.result === 'sent' ? ' event' : '') },
+          `${icon} ${d.buyer || d.order_id}${d.error ? ' — ' + d.error : ''}`);
+        detList.appendChild(line);
+      });
+      cont.appendChild(detList);
+    }
+  }
+
+  // Wire broadcast handlers (once)
+  $('bc-search').addEventListener('input', renderBcProducts);
+  $('btn-bc-search').addEventListener('click', bcSearchBuyers);
+  $('bc-recipients-search').addEventListener('input', renderBcRecipients);
+  $('bc-selectall').addEventListener('change', e => {
+    if (e.target.checked) state.bcRecipients.forEach(r => state.bcSelectedRecipients.add(r.order_id));
+    else state.bcSelectedRecipients.clear();
+    renderBcRecipients();
+  });
+  $('bc-text').addEventListener('input', () => $('bc-charcount').textContent = `${$('bc-text').value.length} / 350`);
+  $('btn-bc-send').addEventListener('click', bcSendBroadcast);
+  $('btn-bc-refresh').addEventListener('click', pollBcStatus);
+
+  // ─── Notification system: events polling, sound, browser push ───────
+  state.lastEventTs = parseInt(localStorage.getItem('mlas_last_event_ts') || '0');
+
+  // Sound preference and audio element
+  state.soundEnabled = localStorage.getItem('mlas_sound') === '1';
+  state.pushEnabled = localStorage.getItem('mlas_push') === '1';
+  let _audio = null;
+  function playSound() {
+    if (!state.soundEnabled) return;
+    // Generate a short pleasant chime via Web Audio API (no asset required)
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [880, 1320].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        const t = ctx.currentTime + i * 0.15;
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.2, t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+        osc.start(t); osc.stop(t + 0.3);
+      });
+    } catch (e) { /* silent */ }
+  }
+
+  function showPushNotification(title, body) {
+    if (!state.pushEnabled) return;
+    if (Notification.permission !== 'granted') return;
+    try {
+      const n = new Notification(title, { body, icon: '/favicon.ico', tag: 'mlas-' + Date.now() });
+      n.onclick = () => { window.focus(); n.close(); };
+      setTimeout(() => n.close(), 8000);
+    } catch (e) { /* silent */ }
+  }
+
+  async function pollEvents() {
+    try {
+      const events = await api(`/api/events?since=${state.lastEventTs}`);
+      if (!events || !events.length) return;
+      for (const ev of events.reverse()) {
+        if (ev.ts <= state.lastEventTs) continue;
+        state.lastEventTs = ev.ts;
+        playSound();
+        showPushNotification(ev.title, ev.body);
+        toast(ev.title + (ev.body ? ' — ' + ev.body : ''), 'ok', 6000);
+      }
+      localStorage.setItem('mlas_last_event_ts', String(state.lastEventTs));
+    } catch (e) { /* silent */ }
+  }
+
+  // Start event polling after login
+  function startEventPolling() {
+    pollEvents();
+    setInterval(pollEvents, 20000); // every 20s
+  }
+
+  // ─── Settings: accounts, health, vacation, theme, backup, OAuth ─────
+  function initSettings() {
+    loadAccounts();
+    loadHealth();
+    loadVacationStatus();
+    loadNotificationPrefs();
+    renderAccentPicker();
+  }
+
+  async function loadAccounts() {
+    try {
+      const accounts = await api('/api/accounts');
+      const cont = $('accounts-list');
+      cont.innerHTML = '';
+      if (!accounts.length) {
+        cont.innerHTML = '<div class="muted small">Nenhuma conta salva ainda. Clique em "Salvar conta atual" para guardar as credenciais ativas.</div>';
+        return;
+      }
+      accounts.forEach(a => {
+        const row = el('div', { class: 'msg-prod-row', style: 'grid-template-columns: 1fr auto auto' });
+        const info = el('div', { class: 'msg-prod-info' });
+        info.appendChild(el('div', { class: 'msg-prod-title' }, `${a.name} ${a.active ? '✓' : ''}`));
+        info.appendChild(el('div', { class: 'msg-prod-meta' }, el('span', {}, `Seller ID: ${a.seller_id}`)));
+        const switchBtn = el('button', { class: 'btn green sm', onclick: () => switchAccount(a.id) }, a.active ? 'Ativa' : 'Trocar');
+        if (a.active) switchBtn.disabled = true;
+        const delBtn = el('button', { class: 'btn red-dim sm', onclick: () => deleteAccount(a.id, a.name) }, '✕');
+        row.append(info, switchBtn, delBtn);
+        cont.appendChild(row);
+      });
+    } catch (e) { /* silent */ }
+  }
+
+  async function switchAccount(id) {
+    try {
+      const r = await api('/api/accounts/switch', { method: 'POST', body: { id }});
+      toast(`Conta ativa: ${r.name}`, 'ok');
+      await loadAccounts();
+      refresh();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function deleteAccount(id, name) {
+    if (!await confirm('Apagar conta', `Apagar "${name}" das contas salvas? Isso não afeta seu Mercado Livre, só remove do seletor local.`, 'Apagar', true)) return;
+    try {
+      await api('/api/accounts/delete', { method: 'POST', body: { id }});
+      toast('Conta removida', 'ok');
+      loadAccounts();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function loadHealth() {
+    try {
+      const h = await api('/api/health');
+      const cont = $('health-info');
+      const fmt = (b) => b ? '<span style="color:var(--accent)">✓</span>' : '<span style="color:var(--danger)">✗</span>';
+      cont.innerHTML = `
+        <div><span class="muted">Versão Worker:</span> v${h.version}</div>
+        <div><span class="muted">Monitoramento:</span> ${fmt(h.monitoring)} ${h.monitoring ? 'Ativo' : 'Pausado'}</div>
+        <div><span class="muted">Token:</span> ${fmt(h.token_set)} ${h.token_set ? 'Salvo' : 'Ausente'}</div>
+        <div><span class="muted">Auto-refresh:</span> ${fmt(h.auto_refresh_ready)} ${h.auto_refresh_ready ? 'Pronto' : 'Faltando credenciais'}</div>
+        <div><span class="muted">Última renovação:</span> ${h.last_refresh_at ? formatDate(h.last_refresh_at) : 'Nunca'}</div>
+        <div><span class="muted">Próxima renovação em:</span> ${h.next_proactive_refresh_in_minutes} min</div>
+        <div><span class="muted">Fila total:</span> ${h.queue_size} pedido(s)</div>
+        <div><span class="muted">Aguardando chat:</span> ${h.queue_awaiting_chat} pedido(s)</div>
+        <div><span class="muted">Prontos para enviar:</span> ${h.queue_ready} pedido(s)</div>
+        ${h.last_order ? `<div><span class="muted">Última venda:</span> ${h.last_order.buyer} (${h.last_order.msgs_sent} msgs)</div>` : ''}
+      `;
+    } catch (e) { /* silent */ }
+  }
+
+  async function loadVacationStatus() {
+    try {
+      const h = await api('/api/health');
+      const stEl = $('vacation-status');
+      if (h.vacation_active && h.vacation_until) {
+        const until = new Date(parseInt(h.vacation_until)).toLocaleString('pt-BR');
+        stEl.innerHTML = `<span style="color:var(--warning)"><strong>⏸ Em férias até ${until}</strong></span>`;
+        $('vac-until').value = new Date(parseInt(h.vacation_until)).toISOString().slice(0, 16);
+      } else {
+        stEl.innerHTML = '<span class="muted">Modo férias inativo</span>';
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  function loadNotificationPrefs() {
+    $('notify-sound').checked = state.soundEnabled;
+    $('notify-push').checked = state.pushEnabled && Notification.permission === 'granted';
+  }
+
+  function renderAccentPicker() {
+    const colors = [
+      { name: 'green', val: '#30d158' },
+      { name: 'blue', val: '#0a84ff' },
+      { name: 'violet', val: '#bf5af2' },
+      { name: 'orange', val: '#ff9500' },
+      { name: 'pink', val: '#ff375f' },
+      { name: 'red', val: '#ff453a' },
+    ];
+    const current = localStorage.getItem('mlas_accent') || '#30d158';
+    const cont = $('accent-picker');
+    if (!cont) return;
+    cont.innerHTML = '';
+    colors.forEach(c => {
+      const btn = el('button', {
+        style: `width:28px;height:28px;border-radius:50%;border:${current===c.val?'3px solid var(--text)':'1px solid var(--border-strong)'};background:${c.val};cursor:pointer;padding:0`,
+        title: c.name,
+        onclick: () => {
+          document.documentElement.style.setProperty('--accent', c.val);
+          localStorage.setItem('mlas_accent', c.val);
+          renderAccentPicker();
+        }
+      });
+      cont.appendChild(btn);
+    });
+    document.documentElement.style.setProperty('--accent', current);
+  }
+
+  // Wire all settings handlers (called once at init)
+  function wireSettingsHandlers() {
+    $('btn-save-account').addEventListener('click', async () => {
+      const name = prompt('Nome para essa conta (ex: Loja Principal, Loja2):');
+      if (!name) return;
+      try {
+        await api('/api/accounts/save_current', { method: 'POST', body: { name }});
+        toast('Conta salva', 'ok');
+        loadAccounts();
+      } catch (e) { toast(e.message, 'err'); }
+    });
+
+    $('btn-health-refresh').addEventListener('click', () => { loadHealth(); loadVacationStatus(); });
+
+    $('btn-vacation-on').addEventListener('click', async () => {
+      const until = $('vac-until').value;
+      if (!until) { toast('Selecione uma data', 'warn'); return; }
+      try {
+        await api('/api/vacation', { method: 'POST', body: { until }});
+        toast('Modo férias ativado', 'ok');
+        loadVacationStatus();
+        refresh();
+      } catch (e) { toast(e.message, 'err'); }
+    });
+    $('btn-vacation-off').addEventListener('click', async () => {
+      try {
+        await api('/api/vacation', { method: 'POST', body: { until: null }});
+        toast('Modo férias cancelado', 'ok');
+        loadVacationStatus();
+        refresh();
+      } catch (e) { toast(e.message, 'err'); }
+    });
+
+    $('notify-sound').addEventListener('change', e => {
+      state.soundEnabled = e.target.checked;
+      localStorage.setItem('mlas_sound', e.target.checked ? '1' : '0');
+      if (e.target.checked) playSound();
+    });
+    $('notify-push').addEventListener('change', async e => {
+      if (e.target.checked) {
+        if (Notification.permission === 'default') {
+          const perm = await Notification.requestPermission();
+          if (perm !== 'granted') {
+            e.target.checked = false;
+            toast('Permissão negada — habilite manualmente nas configurações do navegador', 'warn', 6000);
+            return;
+          }
+        } else if (Notification.permission === 'denied') {
+          e.target.checked = false;
+          toast('Permissão bloqueada — habilite manualmente nas configurações do navegador', 'warn', 6000);
+          return;
+        }
+        state.pushEnabled = true;
+        localStorage.setItem('mlas_push', '1');
+      } else {
+        state.pushEnabled = false;
+        localStorage.setItem('mlas_push', '0');
+      }
+    });
+    $('btn-notify-test').addEventListener('click', () => {
+      playSound();
+      showPushNotification('Teste de notificação', 'Se você ouviu o som e/ou viu essa notificação, está tudo certo!');
+      toast('Notificação de teste enviada', 'ok');
+    });
+
+    document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => {
+      const t = b.dataset.themeSet;
+      document.documentElement.setAttribute('data-theme', t);
+      localStorage.setItem('mlas_theme', t);
+    }));
+
+    $('btn-backup-export').addEventListener('click', async () => {
+      try {
+        const data = await api('/api/backup/export');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = el('a', { href: url, download: `mlas_backup_${new Date().toISOString().slice(0,10)}.json` });
+        a.click(); URL.revokeObjectURL(url);
+        toast('Backup baixado', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    });
+    $('btn-backup-import').addEventListener('click', () => $('backup-file').click());
+    $('backup-file').addEventListener('change', async e => {
+      const file = e.target.files[0]; if (!file) return;
+      if (!await confirm('Restaurar backup', 'Isso vai sobrescrever os dados atuais (produtos, mensagens, configurações). Tem certeza?', 'Restaurar', true)) {
+        e.target.value = ''; return;
+      }
+      try {
+        const text = await file.text();
+        const json = JSON.parse(text);
+        const r = await api('/api/backup/import', { method: 'POST', body: json });
+        toast(`Backup restaurado (${r.restored} itens)`, 'ok');
+        refresh();
+      } catch (err) { toast('Falha ao importar: ' + err.message, 'err'); }
+      e.target.value = '';
+    });
+
+    $('btn-oauth-start').addEventListener('click', async () => {
+      const cid = $('oauth-cid').value.trim();
+      const cs = $('oauth-cs').value.trim();
+      if (!cid || !cs) { toast('Preencha Client ID e Client Secret', 'warn'); return; }
+      // Save them locally for after callback
+      sessionStorage.setItem('mlas_oauth_pending', JSON.stringify({ cid, cs }));
+      const ru = location.origin + location.pathname;
+      const authUrl = `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=${cid}&redirect_uri=${encodeURIComponent(ru)}&scope=offline_access+read+write`;
+      window.location.href = authUrl;
+    });
+  }
+
+  // Handle OAuth callback when returning to the site with ?code=
+  async function handleOAuthCallback() {
+    const code = new URLSearchParams(location.search).get('code');
+    if (!code) return;
+    const pending = sessionStorage.getItem('mlas_oauth_pending');
+    if (!pending) {
+      // Old-style callback — just show the code
+      return;
+    }
+    const { cid, cs } = JSON.parse(pending);
+    sessionStorage.removeItem('mlas_oauth_pending');
+    history.replaceState({}, '', location.pathname);
+    const ru = location.origin + location.pathname;
+    try {
+      const r = await api('/api/oauth/exchange', { method: 'POST', body: {
+        code, client_id: cid, client_secret: cs, redirect_uri: ru
+      }});
+      const msg = r.has_refresh && r.offline_access
+        ? '✓ Autorização concluída! Refresh token salvo, auto-renovação ativa.'
+        : '⚠ Autorização parcial — verifique offline_access no DevCenter';
+      const resultEl = $('oauth-result');
+      if (resultEl) resultEl.innerHTML = `<div class="test-result ${r.has_refresh ? 'ok' : 'err'}">${msg}<br><small>Seller ID: ${r.seller_id}</small></div>`;
+      toast('Autorização atualizada', 'ok');
+      refresh();
+      loadHealth();
+      loadAccounts();
+    } catch (e) {
+      toast('Falha no OAuth: ' + e.message, 'err', 8000);
+    }
   }
 
 })();
