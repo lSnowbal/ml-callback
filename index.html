@@ -267,6 +267,30 @@
         <div class="block-head"><h2>Vendas por Dia</h2></div>
         <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
       </div>
+
+      <div class="block">
+        <div class="block-head">
+          <h2>Conversão por Anúncio</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="conv-days" style="min-width:140px">
+              <option value="7">Últimos 7 dias</option>
+              <option value="15">Últimos 15 dias</option>
+              <option value="30" selected>Últimos 30 dias</option>
+              <option value="60">Últimos 60 dias</option>
+              <option value="90">Últimos 90 dias</option>
+            </select>
+            <button class="btn dark sm" id="btn-conv-load">↻ Calcular</button>
+          </div>
+        </div>
+        <p class="muted small">Visitas ao anúncio × vendas concretizadas. Ajuda a identificar anúncios que recebem tráfego mas vendem pouco (problema de preço, descrição ou imagens) ou que vendem bem (oportunidade de escalar).</p>
+        <div id="conv-summary" class="cards" style="margin-top:14px;grid-template-columns:repeat(3,1fr)"></div>
+        <div class="table-wrap" style="margin-top:14px">
+          <table class="table" id="conv-table">
+            <thead><tr><th>Anúncio</th><th>Status</th><th>Visitas</th><th>Vendas</th><th>Conversão</th><th>Performance</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section class="screen hidden" data-screen="broadcast">

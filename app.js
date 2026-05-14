@@ -164,6 +164,7 @@
     if (name === 'mensagens') { loadTemplates(); loadMessagesScreen(); }
     if (name === 'broadcast') initBroadcast();
     if (name === 'config') initSettings();
+    if (name === 'estatisticas') { renderStats(); /* lazy load conversion */ }
     if (name === 'estatisticas') renderStats();
   }
 
@@ -1670,6 +1671,10 @@
       const authUrl = `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=${cid}&redirect_uri=${encodeURIComponent(ru)}&scope=offline_access+read+write`;
       window.location.href = authUrl;
     });
+
+    // Conversion analytics button
+    const convBtn = $('btn-conv-load');
+    if (convBtn) convBtn.addEventListener('click', loadConversion);
   }
 
   // Handle OAuth callback when returning to the site with ?code=
@@ -1700,6 +1705,79 @@
       loadAccounts();
     } catch (e) {
       toast('Falha no OAuth: ' + e.message, 'err', 8000);
+    }
+  }
+
+  // ─── Conversion analytics ───────────────────────────────────────
+  async function loadConversion() {
+    const tbody = document.querySelector('#conv-table tbody');
+    const summary = $('conv-summary');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center">Calculando… (pode levar 10-30s, depende do número de produtos)</td></tr>';
+    summary.innerHTML = '';
+    const days = $('conv-days').value || '30';
+    try {
+      const data = await api(`/api/conversion?days=${days}`);
+      const total = data.products.length;
+      const totalVisits = data.total_visits || 0;
+      const totalSales = data.total_sales || 0;
+      const avgConv = totalVisits > 0 ? (totalSales / totalVisits * 100) : 0;
+      summary.innerHTML = `
+        <div class="card"><div class="card-label">Total de Visitas (${days}d)</div><div class="card-value blue">${totalVisits.toLocaleString('pt-BR')}</div></div>
+        <div class="card"><div class="card-label">Total de Vendas (${days}d)</div><div class="card-value green">${totalSales}</div></div>
+        <div class="card"><div class="card-label">Conversão Média</div><div class="card-value violet">${avgConv.toFixed(2)}%</div></div>
+      `;
+      tbody.innerHTML = '';
+      if (!data.products.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center">Nenhum produto encontrado</td></tr>';
+        return;
+      }
+      // Compute avg for performance comparison (only products with visits)
+      const productsWithVisits = data.products.filter(p => p.visits > 0);
+      const avgRate = productsWithVisits.length
+        ? productsWithVisits.reduce((s, p) => s + p.conversion_rate, 0) / productsWithVisits.length
+        : 0;
+      data.products.forEach(p => {
+        const tr = el('tr');
+        tr.appendChild(el('td', {}, el('div', { style: 'max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: p.title }, p.title || p.id)));
+        tr.appendChild(el('td', {}, el('span', { class: 'tag ' + (p.listing_status === 'active' ? 'done' : 'pending') },
+          p.listing_status === 'active' ? '● Ativo' : '⏸ Pausado')));
+        tr.appendChild(el('td', {}, p.visits.toLocaleString('pt-BR')));
+        tr.appendChild(el('td', {}, String(p.sales)));
+        // Conversion cell — color based on performance
+        const convCell = el('td');
+        if (p.visits > 0) {
+          let color = 'var(--muted)';
+          if (p.conversion_rate >= avgRate * 1.3) color = 'var(--accent)';
+          else if (p.conversion_rate <= avgRate * 0.5) color = 'var(--danger)';
+          else if (p.conversion_rate >= avgRate) color = 'var(--accent-2)';
+          convCell.innerHTML = `<strong style="color:${color}">${p.conversion_rate.toFixed(2)}%</strong>`;
+        } else {
+          convCell.innerHTML = '<span class="muted">—</span>';
+        }
+        tr.appendChild(convCell);
+        // Performance label
+        let perfTag = '';
+        if (p.visits === 0 && p.sales === 0) {
+          perfTag = '<span class="tag pending">Sem dados</span>';
+        } else if (p.visits === 0 && p.sales > 0) {
+          perfTag = '<span class="tag done">Direto</span>';
+        } else if (p.conversion_rate >= avgRate * 1.5 && p.sales > 0) {
+          perfTag = '<span class="tag done">🚀 Excelente</span>';
+        } else if (p.conversion_rate >= avgRate && p.sales > 0) {
+          perfTag = '<span class="tag sending">👍 Acima da média</span>';
+        } else if (p.visits > 50 && p.sales === 0) {
+          perfTag = '<span class="tag fail">⚠ Tráfego sem venda</span>';
+        } else if (p.conversion_rate < avgRate * 0.5 && p.visits > 0) {
+          perfTag = '<span class="tag fail">📉 Abaixo da média</span>';
+        } else {
+          perfTag = '<span class="tag pending">Normal</span>';
+        }
+        tr.appendChild(el('td', { html: perfTag }));
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center;color:var(--danger)">Erro: ${e.message}</td></tr>`;
     }
   }
 
