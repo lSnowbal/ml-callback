@@ -129,7 +129,10 @@
     startEventPolling();
     // Apply saved accent color
     const savedAccent = localStorage.getItem('mlas_accent');
-    if (savedAccent) document.documentElement.style.setProperty('--accent', savedAccent);
+    if (savedAccent) {
+      document.documentElement.style.setProperty('--accent', savedAccent);
+      document.documentElement.style.setProperty('--grad-green', `linear-gradient(135deg, ${savedAccent} 0%, ${savedAccent}cc 100%)`);
+    }
     // Handle OAuth return
     handleOAuthCallback();
   }
@@ -1536,6 +1539,14 @@
     $('notify-push').checked = state.pushEnabled && Notification.permission === 'granted';
   }
 
+  function applyAccent(color) {
+    document.documentElement.style.setProperty('--accent', color);
+    // Also recompute gradient to match
+    document.documentElement.style.setProperty('--grad-green', `linear-gradient(135deg, ${color} 0%, ${color}cc 100%)`);
+    // Glow for status dot
+    document.documentElement.style.setProperty('--accent-glow', color);
+  }
+
   function renderAccentPicker() {
     const colors = [
       { name: 'green', val: '#30d158' },
@@ -1550,35 +1561,44 @@
     if (!cont) return;
     cont.innerHTML = '';
     colors.forEach(c => {
-      const btn = el('button', {
-        style: `width:28px;height:28px;border-radius:50%;border:${current===c.val?'3px solid var(--text)':'1px solid var(--border-strong)'};background:${c.val};cursor:pointer;padding:0`,
-        title: c.name,
-        onclick: () => {
-          document.documentElement.style.setProperty('--accent', c.val);
-          localStorage.setItem('mlas_accent', c.val);
-          renderAccentPicker();
-        }
-      });
+      const btn = document.createElement('button');
+      btn.style.cssText = `width:28px;height:28px;border-radius:50%;border:${current===c.val?'3px solid var(--text)':'1px solid var(--border-strong)'};background:${c.val};cursor:pointer;padding:0`;
+      btn.title = c.name;
+      btn.onclick = () => {
+        applyAccent(c.val);
+        localStorage.setItem('mlas_accent', c.val);
+        renderAccentPicker();
+      };
       cont.appendChild(btn);
     });
-    document.documentElement.style.setProperty('--accent', current);
+    applyAccent(current);
   }
 
   // Wire all settings handlers (called once at init)
   function wireSettingsHandlers() {
-    $('btn-save-account').addEventListener('click', async () => {
+    // Safe binding helper — logs warning instead of crashing if element missing
+    const on = (id, ev, fn) => {
+      const el = $(id);
+      if (!el) { console.warn(`[wireSettingsHandlers] element #${id} not found`); return; }
+      el.addEventListener(ev, fn);
+    };
+
+    on('btn-save-account', 'click', async () => {
       const name = prompt('Nome para essa conta (ex: Loja Principal, Loja2):');
       if (!name) return;
       try {
         await api('/api/accounts/save_current', { method: 'POST', body: { name }});
         toast('Conta salva', 'ok');
         loadAccounts();
-      } catch (e) { toast(e.message, 'err'); }
+      } catch (e) {
+        console.error('Save account error:', e);
+        toast('Erro: ' + e.message, 'err', 6000);
+      }
     });
 
-    $('btn-health-refresh').addEventListener('click', () => { loadHealth(); loadVacationStatus(); });
+    on('btn-health-refresh', 'click', () => { loadHealth(); loadVacationStatus(); });
 
-    $('btn-vacation-on').addEventListener('click', async () => {
+    on('btn-vacation-on', 'click', async () => {
       const until = $('vac-until').value;
       if (!until) { toast('Selecione uma data', 'warn'); return; }
       try {
@@ -1588,7 +1608,7 @@
         refresh();
       } catch (e) { toast(e.message, 'err'); }
     });
-    $('btn-vacation-off').addEventListener('click', async () => {
+    on('btn-vacation-off', 'click', async () => {
       try {
         await api('/api/vacation', { method: 'POST', body: { until: null }});
         toast('Modo férias cancelado', 'ok');
@@ -1597,12 +1617,12 @@
       } catch (e) { toast(e.message, 'err'); }
     });
 
-    $('notify-sound').addEventListener('change', e => {
+    on('notify-sound', 'change', e => {
       state.soundEnabled = e.target.checked;
       localStorage.setItem('mlas_sound', e.target.checked ? '1' : '0');
       if (e.target.checked) playSound();
     });
-    $('notify-push').addEventListener('change', async e => {
+    on('notify-push', 'change', async e => {
       if (e.target.checked) {
         if (Notification.permission === 'default') {
           const perm = await Notification.requestPermission();
@@ -1623,7 +1643,7 @@
         localStorage.setItem('mlas_push', '0');
       }
     });
-    $('btn-notify-test').addEventListener('click', () => {
+    on('btn-notify-test', 'click', () => {
       playSound();
       showPushNotification('Teste de notificação', 'Se você ouviu o som e/ou viu essa notificação, está tudo certo!');
       toast('Notificação de teste enviada', 'ok');
@@ -1633,20 +1653,29 @@
       const t = b.dataset.themeSet;
       document.documentElement.setAttribute('data-theme', t);
       localStorage.setItem('mlas_theme', t);
+      toast(`Tema: ${t === 'dark' ? 'Escuro' : 'Claro'}`, 'ok', 2000);
     }));
 
-    $('btn-backup-export').addEventListener('click', async () => {
+    on('btn-backup-export', 'click', async () => {
       try {
         const data = await api('/api/backup/export');
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
-        const a = el('a', { href: url, download: `mlas_backup_${new Date().toISOString().slice(0,10)}.json` });
-        a.click(); URL.revokeObjectURL(url);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `mlas_backup_${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
         toast('Backup baixado', 'ok');
-      } catch (e) { toast(e.message, 'err'); }
+      } catch (e) {
+        console.error('Backup error:', e);
+        toast('Erro no backup: ' + e.message, 'err', 6000);
+      }
     });
-    $('btn-backup-import').addEventListener('click', () => $('backup-file').click());
-    $('backup-file').addEventListener('change', async e => {
+    on('btn-backup-import', 'click', () => $('backup-file')?.click());
+    on('backup-file', 'change', async e => {
       const file = e.target.files[0]; if (!file) return;
       if (!await confirm('Restaurar backup', 'Isso vai sobrescrever os dados atuais (produtos, mensagens, configurações). Tem certeza?', 'Restaurar', true)) {
         e.target.value = ''; return;
@@ -1661,20 +1690,17 @@
       e.target.value = '';
     });
 
-    $('btn-oauth-start').addEventListener('click', async () => {
+    on('btn-oauth-start', 'click', async () => {
       const cid = $('oauth-cid').value.trim();
       const cs = $('oauth-cs').value.trim();
       if (!cid || !cs) { toast('Preencha Client ID e Client Secret', 'warn'); return; }
-      // Save them locally for after callback
       sessionStorage.setItem('mlas_oauth_pending', JSON.stringify({ cid, cs }));
       const ru = location.origin + location.pathname;
       const authUrl = `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=${cid}&redirect_uri=${encodeURIComponent(ru)}&scope=offline_access+read+write`;
       window.location.href = authUrl;
     });
 
-    // Conversion analytics button
-    const convBtn = $('btn-conv-load');
-    if (convBtn) convBtn.addEventListener('click', loadConversion);
+    on('btn-conv-load', 'click', loadConversion);
   }
 
   // Handle OAuth callback when returning to the site with ?code=
