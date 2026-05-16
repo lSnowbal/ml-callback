@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=611">
+<link rel="stylesheet" href="style.css?v=614">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -43,6 +43,7 @@
       <button class="nav-btn" data-screen="produtos"><span class="nav-icon">▦</span><span>Produtos</span></button>
       <button class="nav-btn" data-screen="mensagens"><span class="nav-icon">✉</span><span>Mensagens</span></button>
       <button class="nav-btn" data-screen="pedidos"><span class="nav-icon">⊙</span><span>Pedidos</span></button>
+      <button class="nav-btn" data-screen="fila"><span class="nav-icon">⏳</span><span>Fila</span></button>
       <button class="nav-btn" data-screen="falhas"><span class="nav-icon">⚠</span><span>Falhas</span></button>
       <button class="nav-btn" data-screen="estatisticas"><span class="nav-icon">📊</span><span>Estatísticas</span></button>
       <button class="nav-btn" data-screen="broadcast"><span class="nav-icon">📢</span><span>Broadcast</span></button>
@@ -219,6 +220,23 @@
       <div class="table-wrap">
         <table class="table" id="ord-table">
           <thead><tr><th>Pedido</th><th>Produto</th><th>Comprador</th><th>Mensagens</th><th>Status</th><th>Data</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="fila">
+      <div class="screen-head">
+        <h1>Fila</h1>
+        <p class="muted">Pedidos aguardando envio de mensagens automáticas</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn dark" id="btn-loadqueue">↻ Atualizar</button>
+        <span class="muted small" id="queue-count"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="queue-table">
+          <thead><tr><th>Pedido</th><th>Comprador</th><th>Mensagens</th><th>Status</th><th>Próximo envio</th><th>Ações</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -509,6 +527,6 @@
   </div>
 </div>
 
-<script src="app.js?v=611"></script>
+<script src="app.js?v=614"></script>
 </body>
 </html>

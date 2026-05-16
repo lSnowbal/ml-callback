@@ -168,6 +168,7 @@
     if (name === 'broadcast') initBroadcast();
     if (name === 'config') initSettings();
     if (name === 'estatisticas') { renderStats(); /* lazy load conversion */ }
+    if (name === 'fila') loadQueue();
     if (name === 'estatisticas') renderStats();
   }
 
@@ -1701,6 +1702,7 @@
     });
 
     on('btn-conv-load', 'click', loadConversion);
+    on('btn-loadqueue', 'click', loadQueue);
   }
 
   // Handle OAuth callback when returning to the site with ?code=
@@ -1805,6 +1807,73 @@
     } catch (e) {
       tbody.innerHTML = `<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center;color:var(--danger)">Erro: ${e.message}</td></tr>`;
     }
+  }
+
+  // ─── Queue management ───────────────────────────────────────────
+  async function loadQueue() {
+    const tbody = document.querySelector('#queue-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center">Carregando…</td></tr>';
+    try {
+      const queue = await api('/api/queue/list');
+      const count = $('queue-count');
+      if (count) count.textContent = `${queue.length} pedido(s) na fila`;
+      tbody.innerHTML = '';
+      if (!queue.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center">Fila vazia 🎉</td></tr>';
+        return;
+      }
+      queue.forEach(q => {
+        const tr = el('tr');
+        tr.appendChild(el('td', {}, q.order_id));
+        tr.appendChild(el('td', {}, q.buyer || '—'));
+        tr.appendChild(el('td', {}, `${q.total_msgs - q.msgs_remaining}/${q.total_msgs}`));
+        // Status
+        let status;
+        if (!q.chat_opened) {
+          status = el('span', { class: 'tag pending' }, '⏳ Aguardando chat');
+        } else if (q.next_send_at && q.next_send_at <= Date.now()) {
+          status = el('span', { class: 'tag sending' }, '🚀 Pronto');
+        } else {
+          status = el('span', { class: 'tag sending' }, '⏱ Agendado');
+        }
+        tr.appendChild(el('td', {}, status));
+        // Next send
+        let nextSend = '—';
+        if (q.next_send_at) {
+          const diff = q.next_send_at - Date.now();
+          if (diff <= 0) nextSend = 'agora';
+          else if (diff < 60000) nextSend = `em ${Math.round(diff/1000)}s`;
+          else nextSend = `em ${Math.round(diff/60000)}min`;
+        } else if (q.chat_retry_count > 0) {
+          nextSend = `${q.chat_retry_count} tentativa(s)`;
+        }
+        tr.appendChild(el('td', {}, nextSend));
+        // Actions
+        const actionsCell = el('td');
+        const forceBtn = el('button', {
+          class: 'btn green sm',
+          onclick: () => forceSend(q.order_id, q.buyer)
+        }, '⚡ Forçar envio');
+        actionsCell.appendChild(forceBtn);
+        tr.appendChild(actionsCell);
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted small" style="padding:20px;text-align:center;color:var(--danger)">Erro: ${e.message}</td></tr>`;
+    }
+  }
+
+  async function forceSend(orderId, buyer) {
+    if (!await confirm(`Forçar envio: ${buyer || orderId}`,
+      `Vai liberar o envio imediato das mensagens automáticas para esse pedido, mesmo sem o comprador ter aberto o chat. Use apenas se você confirmou manualmente que o chat está aberto.`,
+      'Forçar envio')) return;
+    try {
+      await api('/api/order/force_send', { method: 'POST', body: { order_id: orderId }});
+      toast('Envio forçado — mensagens devem sair em segundos', 'ok');
+      setTimeout(loadQueue, 3000);
+      refresh();
+    } catch (e) { toast(e.message, 'err'); }
   }
 
 })();
