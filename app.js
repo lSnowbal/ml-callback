@@ -95,10 +95,11 @@
     if (state.secret) tryLogin(true);
   }
 
-  $('login-worker').value = (stored?.worker) || DEFAULT_WORKER;
+  const _lw = $('login-worker');
+  if (_lw) _lw.value = (stored?.worker) || DEFAULT_WORKER;
 
-  $('login-btn').addEventListener('click', () => tryLogin(false));
-  $('login-secret').addEventListener('keydown', e => { if (e.key === 'Enter') tryLogin(false); });
+  bind('login-btn', 'click', () => tryLogin(false));
+  bind('login-secret', 'keydown', e => { if (e.key === 'Enter') tryLogin(false); });
 
   async function tryLogin(silent) {
     const worker = $('login-worker').value.trim() || DEFAULT_WORKER;
@@ -135,6 +136,7 @@
     safe('setupKeyboard', setupKeyboard);
     safe('setupSidebar', setupSidebar);
     safe('wireSettingsHandlers', wireSettingsHandlers);
+    safe('wireBroadcastHandlers', wireBroadcastHandlers);
     safe('refresh', refresh);
     state.pollHandle = setInterval(refresh, 15000);
     safe('startEventPolling', startEventPolling);
@@ -1387,18 +1389,23 @@
     }
   }
 
-  // Wire broadcast handlers (once)
-  $('bc-search').addEventListener('input', renderBcProducts);
-  $('btn-bc-search').addEventListener('click', bcSearchBuyers);
-  $('bc-recipients-search').addEventListener('input', renderBcRecipients);
-  $('bc-selectall').addEventListener('change', e => {
-    if (e.target.checked) state.bcRecipients.forEach(r => state.bcSelectedRecipients.add(r.order_id));
-    else state.bcSelectedRecipients.clear();
-    renderBcRecipients();
-  });
-  $('bc-text').addEventListener('input', () => $('bc-charcount').textContent = `${$('bc-text').value.length} / 350`);
-  $('btn-bc-send').addEventListener('click', bcSendBroadcast);
-  $('btn-bc-refresh').addEventListener('click', pollBcStatus);
+  // Wire broadcast handlers — called from initApp, uses safe bind
+  function wireBroadcastHandlers() {
+    bind('bc-search', 'input', renderBcProducts);
+    bind('btn-bc-search', 'click', bcSearchBuyers);
+    bind('bc-recipients-search', 'input', renderBcRecipients);
+    bind('bc-selectall', 'change', e => {
+      if (e.target.checked) state.bcRecipients.forEach(r => state.bcSelectedRecipients.add(r.order_id));
+      else state.bcSelectedRecipients.clear();
+      renderBcRecipients();
+    });
+    bind('bc-text', 'input', () => {
+      const cc = $('bc-charcount'), txt = $('bc-text');
+      if (cc && txt) cc.textContent = `${txt.value.length} / 350`;
+    });
+    bind('btn-bc-send', 'click', bcSendBroadcast);
+    bind('btn-bc-refresh', 'click', pollBcStatus);
+  }
 
   // ─── Notification system: events polling, sound, browser push ───────
   state.lastEventTs = parseInt(localStorage.getItem('mlas_last_event_ts') || '0');
@@ -1465,6 +1472,108 @@
     loadVacationStatus();
     loadNotificationPrefs();
     renderAccentPicker();
+    initCloneSection();
+  }
+
+  // ─── Clone listings between accounts ────────────────────────────
+  state.cloneSelected = new Set();
+
+  async function initCloneSection() {
+    // Populate target account dropdown
+    try {
+      const accounts = await api('/api/accounts');
+      const sel = $('clone-target');
+      if (sel) {
+        const others = accounts.filter(a => !a.active);
+        sel.innerHTML = others.length
+          ? others.map(a => `<option value="${a.id}">${a.name} (${a.seller_id})</option>`).join('')
+          : '<option value="">Nenhuma outra conta salva</option>';
+      }
+    } catch (e) { /* silent */ }
+    // Load products of active account
+    if (!state.products.length) {
+      try { state.products = await api('/api/products'); } catch (e) {}
+    }
+    renderCloneProducts();
+  }
+
+  function renderCloneProducts() {
+    const cont = $('clone-prod-list');
+    if (!cont) return;
+    const q = ($('clone-search')?.value || '').toLowerCase();
+    const filtered = state.products.filter(p =>
+      !q || `${p.title || ''}${p.id}`.toLowerCase().includes(q));
+    cont.innerHTML = '';
+    if (!filtered.length) {
+      cont.innerHTML = '<div class="muted small" style="padding:16px;text-align:center">Nenhum anúncio.</div>';
+      return;
+    }
+    filtered.forEach(p => {
+      const sel = state.cloneSelected.has(p.id);
+      const row = el('div', { class: 'msg-prod-row' + (sel ? ' selected' : ''), 'data-pid': p.id });
+      const cb = el('input', { type: 'checkbox' });
+      cb.checked = sel;
+      cb.onchange = e => {
+        e.stopPropagation();
+        if (cb.checked) state.cloneSelected.add(p.id); else state.cloneSelected.delete(p.id);
+        row.classList.toggle('selected', cb.checked);
+      };
+      const info = el('div', { class: 'msg-prod-info' });
+      info.appendChild(el('div', { class: 'msg-prod-title' }, p.title || p.id));
+      info.appendChild(el('div', { class: 'msg-prod-meta' }, el('span', {}, p.id)));
+      row.addEventListener('click', () => cb.click());
+      row.append(cb, el('span', {}), info);
+      cont.appendChild(row);
+    });
+  }
+
+  async function startClone() {
+    const targetId = $('clone-target')?.value;
+    if (!targetId) { toast('Selecione uma conta destino', 'warn'); return; }
+    const ids = Array.from(state.cloneSelected);
+    if (!ids.length) { toast('Selecione ao menos 1 anúncio', 'warn'); return; }
+    const mode = $('clone-mode')?.value || 'paused';
+    if (!await confirm('Clonar anúncios',
+      `Vai clonar ${ids.length} anúncio(s) para a conta selecionada, criados como "${mode === 'active' ? 'ATIVO' : 'pausado'}".\n\nLembre: o ML pode penalizar catálogo duplicado. Revise os anúncios clonados antes de divulgar.`,
+      'Clonar', mode === 'active')) return;
+    try {
+      const r = await api('/api/listings/clone', { method: 'POST', body: {
+        item_ids: ids, target_account_id: targetId, mode
+      }});
+      state.cloneJobId = r.job_id;
+      toast('Clonagem iniciada em background', 'ok');
+      pollCloneStatus();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function pollCloneStatus() {
+    if (!state.cloneJobId) return;
+    try {
+      const job = await api(`/api/listings/clone/status?id=${state.cloneJobId}`);
+      const cont = $('clone-progress');
+      if (cont) {
+        const pct = job.total ? Math.round((job.done + job.failed) / job.total * 100) : 0;
+        cont.innerHTML = `
+          <div class="info-grid">
+            <div><span class="muted">Status:</span> <strong>${job.status === 'done' ? '✓ Concluído' : '⏳ Clonando'}</strong></div>
+            <div><span class="muted">Clonados:</span> <strong style="color:var(--accent)">${job.done}</strong>/${job.total}</div>
+            <div><span class="muted">Falhas:</span> <strong style="color:var(--danger)">${job.failed}</strong></div>
+          </div>
+          <div style="margin-top:8px;background:var(--surface-2);border-radius:8px;height:8px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:var(--accent);transition:width .3s"></div>
+          </div>`;
+        if (job.details && job.details.length) {
+          const log = el('div', { class: 'log', style: 'margin-top:12px;max-height:180px' });
+          job.details.slice(-20).reverse().forEach(d => {
+            const icon = d.result === 'clonado' ? '✅' : '❌';
+            log.appendChild(el('div', { class: 'log-line' }, `${icon} ${(d.title || d.item_id).slice(0,45)}${d.error ? ' — ' + d.error : ''}`));
+          });
+          cont.appendChild(log);
+        }
+      }
+      if (job.status === 'in_progress') setTimeout(pollCloneStatus, 3000);
+      else { state.cloneSelected.clear(); renderCloneProducts(); }
+    } catch (e) { /* silent */ }
   }
 
   async function loadAccounts() {
@@ -1710,6 +1819,14 @@
 
     on('btn-conv-load', 'click', loadConversion);
     on('btn-loadqueue', 'click', loadQueue);
+    on('btn-clone-start', 'click', startClone);
+    on('clone-search', 'input', renderCloneProducts);
+    on('clone-selectall', 'change', e => {
+      const rows = document.querySelectorAll('#clone-prod-list .msg-prod-row[data-pid]');
+      if (e.target.checked) rows.forEach(r => state.cloneSelected.add(r.dataset.pid));
+      else rows.forEach(r => state.cloneSelected.delete(r.dataset.pid));
+      renderCloneProducts();
+    });
   }
 
   // Handle OAuth callback when returning to the site with ?code=
