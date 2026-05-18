@@ -24,6 +24,13 @@
   // ─── DOM helpers ────────────────────────────────────────────────
   const $ = id => document.getElementById(id);
   const $$ = sel => document.querySelectorAll(sel);
+  // Safe event binding — never throws if element is missing
+  const bind = (id, event, fn) => {
+    const elem = document.getElementById(id);
+    if (!elem) { console.warn(`[bind] #${id} não encontrado — handler ignorado`); return false; }
+    elem.addEventListener(event, fn);
+    return true;
+  };
   const el = (tag, attrs = {}, ...children) => {
     const e = document.createElement(tag);
     for (const k in attrs) {
@@ -118,30 +125,34 @@
 
   // ─── App init ───────────────────────────────────────────────────
   function initApp() {
-    setupNav();
-    setupTheme();
-    setupActions();
-    setupKeyboard();
-    setupSidebar();
-    wireSettingsHandlers();
-    refresh();
-    state.pollHandle = setInterval(refresh, 15000); // every 15s
-    startEventPolling();
-    // Apply saved accent color
-    const savedAccent = localStorage.getItem('mlas_accent');
-    if (savedAccent) {
-      document.documentElement.style.setProperty('--accent', savedAccent);
-      document.documentElement.style.setProperty('--grad-green', `linear-gradient(135deg, ${savedAccent} 0%, ${savedAccent}cc 100%)`);
-    }
-    // Handle OAuth return
-    handleOAuthCallback();
+    const safe = (label, fn) => {
+      try { fn(); }
+      catch (e) { console.error(`[initApp] erro em ${label}:`, e); }
+    };
+    safe('setupNav', setupNav);
+    safe('setupTheme', setupTheme);
+    safe('setupActions', setupActions);
+    safe('setupKeyboard', setupKeyboard);
+    safe('setupSidebar', setupSidebar);
+    safe('wireSettingsHandlers', wireSettingsHandlers);
+    safe('refresh', refresh);
+    state.pollHandle = setInterval(refresh, 15000);
+    safe('startEventPolling', startEventPolling);
+    safe('accent', () => {
+      const savedAccent = localStorage.getItem('mlas_accent');
+      if (savedAccent) {
+        document.documentElement.style.setProperty('--accent', savedAccent);
+        document.documentElement.style.setProperty('--grad-green', `linear-gradient(135deg, ${savedAccent} 0%, ${savedAccent}cc 100%)`);
+      }
+    });
+    safe('handleOAuthCallback', handleOAuthCallback);
   }
 
   // ─── Theme ──────────────────────────────────────────────────────
   function setupTheme() {
     const saved = localStorage.getItem('mlas_theme') || 'dark';
     document.documentElement.setAttribute('data-theme', saved);
-    $('theme-toggle').addEventListener('click', () => {
+    bind('theme-toggle', 'click', () => {
       const cur = document.documentElement.getAttribute('data-theme');
       const next = cur === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', next);
@@ -154,29 +165,37 @@
     $$('.nav-btn').forEach(b => b.addEventListener('click', () => {
       const screen = b.dataset.screen;
       switchScreen(screen);
-      if (window.innerWidth <= 768) $('sidebar').classList.remove('open');
+      if (window.innerWidth <= 768) {
+        const sb = $('sidebar');
+        if (sb) sb.classList.remove('open');
+      }
     }));
   }
   function switchScreen(name) {
     state.currentScreen = name;
     $$('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.screen === name));
     $$('.screen').forEach(s => s.classList.toggle('hidden', s.dataset.screen !== name));
-    if (name === 'produtos' && state.products.length === 0) loadProducts();
-    if (name === 'pedidos') loadOrders();
-    if (name === 'falhas') loadFails();
-    if (name === 'mensagens') { loadTemplates(); loadMessagesScreen(); }
-    if (name === 'broadcast') initBroadcast();
-    if (name === 'config') initSettings();
-    if (name === 'estatisticas') { renderStats(); /* lazy load conversion */ }
-    if (name === 'fila') loadQueue();
-    if (name === 'estatisticas') renderStats();
+    try {
+      if (name === 'produtos' && state.products.length === 0) loadProducts();
+      if (name === 'pedidos') loadOrders();
+      if (name === 'falhas') loadFails();
+      if (name === 'mensagens') { loadTemplates(); loadMessagesScreen(); }
+      if (name === 'broadcast') initBroadcast();
+      if (name === 'config') initSettings();
+      if (name === 'estatisticas') renderStats();
+      if (name === 'fila') loadQueue();
+    } catch (e) { console.error(`[switchScreen ${name}]`, e); }
   }
 
   // ─── Sidebar mobile ─────────────────────────────────────────────
   function setupSidebar() {
-    $('sidebar-open').addEventListener('click', () => $('sidebar').classList.add('open'));
-    $('sidebar-close').addEventListener('click', () => $('sidebar').classList.remove('open'));
-    $('logout-btn').addEventListener('click', async () => {
+    bind('sidebar-open', 'click', () => {
+      const sb = $('sidebar'); if (sb) sb.classList.add('open');
+    });
+    bind('sidebar-close', 'click', () => {
+      const sb = $('sidebar'); if (sb) sb.classList.remove('open');
+    });
+    bind('logout-btn', 'click', async () => {
       if (await confirm('Sair', 'Deseja sair? Você precisará da chave secreta para entrar de novo.', 'Sair')) {
         localStorage.removeItem('mlas_auth');
         location.reload();
@@ -186,58 +205,54 @@
 
   // ─── Actions wiring ─────────────────────────────────────────────
   function setupActions() {
-    $('refresh-btn').addEventListener('click', refresh);
-    $('btn-activate').addEventListener('click', () => toggleMonitoring(true));
-    $('btn-pause').addEventListener('click', () => toggleMonitoring(false));
-    $('btn-checknow').addEventListener('click', checkNow);
-    $('btn-zerar').addEventListener('click', () => danger('/api/stats/reset', 'Zerar contadores', 'Os contadores serão zerados. Sem efeito nas mensagens.'));
-    $('btn-clearqueue').addEventListener('click', () => danger('/api/queue/clear', 'Limpar fila', 'Pedidos pendentes serão removidos da fila. Vendas já confirmadas não serão afetadas.'));
-    $('btn-reset').addEventListener('click', () => danger('/api/full/reset', 'Reset Total', 'Apaga: estatísticas, fila, IDs processados, falhas e logs. Credenciais e produtos NÃO são afetados.'));
-    $('btn-clearlog').addEventListener('click', () => danger('/api/logs/clear', 'Limpar logs', 'Apaga apenas o histórico de mensagens do log de atividade.'));
+    bind('refresh-btn', 'click', refresh);
+    bind('btn-activate', 'click', () => toggleMonitoring(true));
+    bind('btn-pause', 'click', () => toggleMonitoring(false));
+    bind('btn-checknow', 'click', checkNow);
+    bind('btn-zerar', 'click', () => danger('/api/stats/reset', 'Zerar contadores', 'Os contadores serão zerados. Sem efeito nas mensagens.'));
+    bind('btn-clearqueue', 'click', () => danger('/api/queue/clear', 'Limpar fila', 'Pedidos pendentes serão removidos da fila. Vendas já confirmadas não serão afetadas.'));
+    bind('btn-reset', 'click', () => danger('/api/full/reset', 'Reset Total', 'Apaga: estatísticas, fila, IDs processados, falhas e logs. Credenciais e produtos NÃO são afetados.'));
+    bind('btn-clearlog', 'click', () => danger('/api/logs/clear', 'Limpar logs', 'Apaga apenas o histórico de mensagens do log de atividade.'));
 
-    $('btn-loadprods').addEventListener('click', loadProducts);
-    $('prod-search').addEventListener('input', renderProducts);
-    $('prod-filter').addEventListener('change', renderProducts);
-    $('prod-selectall').addEventListener('change', e => {
+    bind('btn-loadprods', 'click', loadProducts);
+    bind('prod-search', 'input', renderProducts);
+    bind('prod-filter', 'change', renderProducts);
+    bind('prod-selectall', 'change', e => {
       const rows = document.querySelectorAll('#prod-list .prod-row[data-pid]');
       if (e.target.checked) rows.forEach(r => state.prodSelected.add(r.dataset.pid));
       else rows.forEach(r => state.prodSelected.delete(r.dataset.pid));
       renderProducts();
     });
-    $('btn-bulk-enable').addEventListener('click', () => bulkProdToggle(true));
-    $('btn-bulk-disable').addEventListener('click', () => bulkProdToggle(false));
-    $('btn-bulk-active').addEventListener('click', () => bulkListingStatus('active'));
-    $('btn-bulk-pause').addEventListener('click', () => bulkListingStatus('paused'));
-    $('btn-bulk-stock').addEventListener('click', bulkEditStock);
-    $('btn-bulk-delay').addEventListener('click', bulkEditDelay);
-    $('btn-bulk-clear-prod').addEventListener('click', () => { state.prodSelected.clear(); renderProducts(); });
+    bind('btn-bulk-enable', 'click', () => bulkProdToggle(true));
+    bind('btn-bulk-disable', 'click', () => bulkProdToggle(false));
+    bind('btn-bulk-active', 'click', () => bulkListingStatus('active'));
+    bind('btn-bulk-pause', 'click', () => bulkListingStatus('paused'));
+    bind('btn-bulk-stock', 'click', bulkEditStock);
+    bind('btn-bulk-delay', 'click', bulkEditDelay);
+    bind('btn-bulk-clear-prod', 'click', () => { state.prodSelected.clear(); renderProducts(); });
 
-    $('btn-loadords').addEventListener('click', loadOrders);
-    $('ord-search').addEventListener('input', renderOrders);
-    $('ord-filter').addEventListener('change', renderOrders);
-    $('ord-date-filter').addEventListener('change', renderOrders);
-    $('btn-export').addEventListener('click', exportOrdersCSV);
+    bind('btn-loadords', 'click', loadOrders);
+    bind('ord-search', 'input', renderOrders);
+    bind('ord-filter', 'change', renderOrders);
+    bind('ord-date-filter', 'change', renderOrders);
+    bind('btn-export', 'click', exportOrdersCSV);
 
-    $('btn-loadfail').addEventListener('click', loadFails);
-    $('btn-clearfail').addEventListener('click', () => danger('/api/failed_messages/clear', 'Limpar falhas', 'A lista de falhas será zerada.'));
+    bind('btn-loadfail', 'click', loadFails);
+    bind('btn-clearfail', 'click', () => danger('/api/failed_messages/clear', 'Limpar falhas', 'A lista de falhas será zerada.'));
 
-    $('btn-newtpl').addEventListener('click', newTemplate);
-    // Messages screen handlers (multi-select edition)
-    $('btn-loadmsg').addEventListener('click', loadMessagesScreen);
-    $('msg-search').addEventListener('input', renderMessagesList);
-    $('msg-filter').addEventListener('change', renderMessagesList);
-    $('msg-selectall').addEventListener('change', e => {
+    bind('btn-newtpl', 'click', newTemplate);
+    bind('btn-loadmsg', 'click', loadMessagesScreen);
+    bind('msg-search', 'input', renderMessagesList);
+    bind('msg-filter', 'change', renderMessagesList);
+    bind('msg-selectall', 'change', e => {
       const rows = document.querySelectorAll('#msg-prod-list .msg-prod-row[data-pid]');
-      if (e.target.checked) {
-        rows.forEach(r => state.msgSelected.add(r.dataset.pid));
-      } else {
-        rows.forEach(r => state.msgSelected.delete(r.dataset.pid));
-      }
+      if (e.target.checked) rows.forEach(r => state.msgSelected.add(r.dataset.pid));
+      else rows.forEach(r => state.msgSelected.delete(r.dataset.pid));
       renderMessagesList();
     });
-    $('btn-bulk-edit').addEventListener('click', bulkEditMessages);
-    $('btn-bulk-template').addEventListener('click', bulkApplyTemplate);
-    $('btn-bulk-clear').addEventListener('click', () => { state.msgSelected.clear(); renderMessagesList(); });
+    bind('btn-bulk-edit', 'click', bulkEditMessages);
+    bind('btn-bulk-template', 'click', bulkApplyTemplate);
+    bind('btn-bulk-clear', 'click', () => { state.msgSelected.clear(); renderMessagesList(); });
 
     $$('.tab').forEach(t => t.addEventListener('click', () => {
       $$('.tab').forEach(x => x.classList.remove('active'));
@@ -245,18 +260,10 @@
       $$('.tab-content').forEach(c => c.classList.toggle('hidden', c.dataset.tab !== t.dataset.tab));
     }));
 
-    $('btn-testsend').addEventListener('click', testSend);
-    $('btn-retry').addEventListener('click', retryOrder);
-
-    $('btn-savecreds').addEventListener('click', saveCreds);
-
-    $('oauth-link').addEventListener('click', e => {
-      e.preventDefault();
-      const cid = $('cfg-cid').value.trim();
-      if (!cid) { toast('Configure o Client ID primeiro', 'warn'); return; }
-      const ru = location.origin + location.pathname;
-      window.open(`https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=${cid}&redirect_uri=${encodeURIComponent(ru)}&scope=offline_access+read+write`, '_blank');
-    });
+    bind('btn-testsend', 'click', testSend);
+    bind('btn-retry', 'click', retryOrder);
+    bind('btn-savecreds', 'click', saveCreds);
+    // Note: oauth-link was removed from HTML (replaced by integrated OAuth in Settings)
   }
 
   async function danger(path, title, body) {
