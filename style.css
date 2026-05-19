@@ -335,7 +335,6 @@ body { background: var(--bg-grad); }
   padding: 10px 14px; margin-bottom: 12px;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px;
-  position: sticky; top: 60px; z-index: 30;
   flex-wrap: wrap; gap: 10px;
 }
 .bulk-checkall {
@@ -647,4 +646,54 @@ body { background: var(--bg-grad); }
   background: linear-gradient(90deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
+}
+
+/* ─── Scroll-list: caixa com altura máxima e scroll interno ─── */
+.scroll-list {
+  max-height: 440px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 4px;
+  background: var(--surface);
+  /* sombra interna sutil no topo/base indicando que há mais conteúdo */
+  background-image:
+    linear-gradient(var(--surface) 30%, rgba(0,0,0,0)),
+    linear-gradient(rgba(0,0,0,0), var(--surface) 70%),
+    linear-gradient(180deg, rgba(0,0,0,.12), rgba(0,0,0,0)),
+    linear-gradient(0deg, rgba(0,0,0,.12), rgba(0,0,0,0));
+  background-position: 0 0, 0 100%, 0 0, 0 100%;
+  background-repeat: no-repeat;
+  background-size: 100% 24px, 100% 24px, 100% 10px, 100% 10px;
+  background-attachment: local, local, scroll, scroll;
+}
+.scroll-list:empty { display: none; }
+/* Quando a lista tem rows que já têm borda própria, evita borda dupla */
+.scroll-list .msg-prod-row,
+.scroll-list .prod-row {
+  border-left: none;
+  border-right: none;
+}
+.scroll-list .msg-prod-row:first-child,
+.scroll-list .prod-row:first-child { border-radius: 8px 8px 0 0; }
+.scroll-list .msg-prod-row:last-child,
+.scroll-list .prod-row:last-child { border-radius: 0 0 8px 8px; }
+/* Scrollbar estilizada */
+.scroll-list::-webkit-scrollbar { width: 10px; }
+.scroll-list::-webkit-scrollbar-track { background: transparent; }
+.scroll-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 2px solid var(--surface);
+}
+.scroll-list::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+/* Contador de itens / dica de scroll */
+.list-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--muted);
+  padding: 4px 4px 8px;
+}
+/* Em telas pequenas, lista um pouco menor pra caber mais coisa na tela */
+@media (max-width: 768px) {
+  .scroll-list { max-height: 360px; }
 }

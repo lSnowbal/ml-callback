@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=618">
+<link rel="stylesheet" href="style.css?v=619">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -148,7 +148,7 @@
         </div>
       </div>
 
-      <div class="prod-list" id="prod-list"></div>
+      <div class="prod-list scroll-list" id="prod-list"></div>
     </section>
 
     <section class="screen hidden" data-screen="mensagens">
@@ -180,7 +180,7 @@
         </div>
       </div>
 
-      <div class="msg-prod-list" id="msg-prod-list"></div>
+      <div class="msg-prod-list scroll-list" id="msg-prod-list"></div>
 
       <details class="templates-section">
         <summary>📑 Biblioteca de Templates <span class="muted small" id="tpl-counter"></span></summary>
@@ -330,7 +330,7 @@
           </select>
           <button class="btn dark" id="btn-bc-search">🔎 Buscar compradores</button>
         </div>
-        <div id="bc-prod-list" class="msg-prod-list" style="margin-top:8px"></div>
+        <div id="bc-prod-list" class="msg-prod-list scroll-list" style="margin-top:8px"></div>
       </div>
 
       <div class="block hidden" id="bc-recipients-block">
@@ -342,7 +342,7 @@
           <label class="bulk-checkall"><input type="checkbox" id="bc-selectall"><span>Selecionar todos</span></label>
           <input class="search" id="bc-recipients-search" placeholder="🔍 Filtrar por nome/ID…">
         </div>
-        <div id="bc-recipients-list" class="msg-prod-list"></div>
+        <div id="bc-recipients-list" class="msg-prod-list scroll-list"></div>
       </div>
 
       <div class="block hidden" id="bc-compose-block">
@@ -432,7 +432,7 @@
           </select>
           <button class="btn dark" id="btn-clone-start">📋 Clonar selecionados</button>
         </div>
-        <div id="clone-prod-list" class="msg-prod-list" style="margin-top:8px"></div>
+        <div id="clone-prod-list" class="msg-prod-list scroll-list" style="margin-top:8px"></div>
         <div id="clone-progress" style="margin-top:14px"></div>
       </div>
 
@@ -552,6 +552,6 @@
   </div>
 </div>
 
-<script src="app.js?v=618"></script>
+<script src="app.js?v=619"></script>
 </body>
 </html>
