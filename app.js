@@ -186,6 +186,7 @@
       if (name === 'config') initSettings();
       if (name === 'estatisticas') renderStats();
       if (name === 'fila') loadQueue();
+      if (name === 'conversas') loadInbox();
     } catch (e) { console.error(`[switchScreen ${name}]`, e); }
   }
 
@@ -1473,6 +1474,7 @@
     loadNotificationPrefs();
     renderAccentPicker();
     initCloneSection();
+    loadAIConfig();
   }
 
   // ─── Clone listings between accounts ────────────────────────────
@@ -1821,6 +1823,13 @@
     on('btn-loadqueue', 'click', loadQueue);
     on('btn-clone-start', 'click', startClone);
     on('clone-search', 'input', renderCloneProducts);
+    on('btn-load-inbox', 'click', loadInbox);
+    on('btn-ai-save', 'click', saveAIConfig);
+    on('btn-ai-test', 'click', testAI);
+    on('btn-ai-addfaq', 'click', () => {
+      state.aiFaq.push({ q: '', a: '' });
+      renderAIFaq();
+    });
     on('clone-selectall', 'change', e => {
       const rows = document.querySelectorAll('#clone-prod-list .msg-prod-row[data-pid]');
       if (e.target.checked) rows.forEach(r => state.cloneSelected.add(r.dataset.pid));
@@ -1998,6 +2007,216 @@
       setTimeout(loadQueue, 3000);
       refresh();
     } catch (e) { toast(e.message, 'err'); }
+  }
+
+  // ════════════ INBOX / CONVERSAS ════════════
+  state.inboxActivePack = null;
+
+  async function loadInbox() {
+    const listEl = $('inbox-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<div class="muted small" style="padding:16px;text-align:center">Carregando…</div>';
+    try {
+      const [convos, suggestions] = await Promise.all([
+        api('/api/inbox/list'),
+        api('/api/inbox/suggestions').catch(() => []),
+      ]);
+      renderSuggestionsBar(suggestions);
+      const cnt = $('inbox-count');
+      if (cnt) cnt.textContent = `${convos.length} conversa(s)`;
+      listEl.innerHTML = '';
+      if (!convos.length) {
+        listEl.innerHTML = '<div class="muted small" style="padding:16px;text-align:center">Nenhuma conversa ainda.</div>';
+        return;
+      }
+      convos.forEach(c => {
+        const row = el('div', { class: 'inbox-convo' + (c.pack_id === state.inboxActivePack ? ' active' : ''), 'data-pack': c.pack_id });
+        const top = el('div', { class: 'inbox-convo-top' });
+        top.appendChild(el('span', { class: 'inbox-convo-buyer' }, c.buyer));
+        if (c.unread) top.appendChild(el('span', { class: 'inbox-unread-dot' }));
+        row.appendChild(top);
+        if (c.last_msg_preview) row.appendChild(el('div', { class: 'inbox-convo-preview' }, c.last_msg_preview));
+        row.appendChild(el('div', { class: 'inbox-convo-preview' }, `Pedido ${c.order_id}`));
+        row.addEventListener('click', () => openThread(c));
+        listEl.appendChild(row);
+      });
+    } catch (e) {
+      listEl.innerHTML = `<div class="muted small" style="padding:16px;color:var(--danger)">Erro: ${e.message}</div>`;
+    }
+  }
+
+  function renderSuggestionsBar(suggestions) {
+    const bar = $('inbox-suggestions-bar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    if (!suggestions || !suggestions.length) return;
+    const header = el('div', { class: 'muted small', style: 'margin:8px 0;font-weight:600' },
+      `🤖 ${suggestions.length} pergunta(s) com sugestão da IA aguardando`);
+    bar.appendChild(header);
+    suggestions.forEach(s => {
+      const card = el('div', { class: 'sugg-card' });
+      card.appendChild(el('div', { class: 'muted small' }, `Pergunta: "${s.question}"`));
+      if (s.suggested_reply) {
+        card.appendChild(el('div', { style: 'margin:6px 0;font-size:14px' }, `Sugestão: ${s.suggested_reply}`));
+      } else {
+        card.appendChild(el('div', { class: 'muted small', style: 'margin:6px 0' }, `IA não respondeu: ${s.reason || 'requer sua atenção'}`));
+      }
+      const acts = el('div', { style: 'display:flex;gap:8px;margin-top:6px' });
+      acts.appendChild(el('button', { class: 'btn dark sm', onclick: () => {
+        openThread({ pack_id: s.pack_id, buyer_id: s.buyer_id, buyer: 'Comprador', order_id: '' }, s.suggested_reply);
+      }}, 'Abrir conversa'));
+      acts.appendChild(el('button', { class: 'btn ghost sm', onclick: async () => {
+        try { await api('/api/inbox/suggestions/dismiss', { method: 'POST', body: { pack_id: s.pack_id } }); loadInbox(); }
+        catch (e) { toast(e.message, 'err'); }
+      }}, 'Descartar'));
+      card.appendChild(acts);
+      bar.appendChild(card);
+    });
+  }
+
+  async function openThread(convo, prefillReply) {
+    state.inboxActivePack = convo.pack_id;
+    $$('#inbox-list .inbox-convo').forEach(r =>
+      r.classList.toggle('active', r.dataset.pack === convo.pack_id));
+    const threadEl = $('inbox-thread');
+    if (!threadEl) return;
+    threadEl.innerHTML = '<div class="inbox-empty muted">Carregando conversa…</div>';
+    try {
+      const data = await api(`/api/inbox/thread?pack_id=${encodeURIComponent(convo.pack_id)}`);
+      threadEl.innerHTML = '';
+      const msgsEl = el('div', { class: 'inbox-messages' });
+      if (!data.messages || !data.messages.length) {
+        msgsEl.appendChild(el('div', { class: 'muted small', style: 'margin:auto' }, 'Sem mensagens nesta conversa.'));
+      } else {
+        data.messages.forEach(m => {
+          const bubble = el('div', { class: 'inbox-msg ' + (m.from === 'seller' ? 'seller' : 'buyer') });
+          bubble.appendChild(el('div', {}, m.text || '(sem texto)'));
+          if (m.date) {
+            const d = new Date(m.date);
+            bubble.appendChild(el('div', { class: 'inbox-msg-time' },
+              isNaN(d) ? '' : d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })));
+          }
+          msgsEl.appendChild(bubble);
+        });
+      }
+      threadEl.appendChild(msgsEl);
+
+      // AI suggestion box
+      const suggestion = data.suggestion || (prefillReply ? { suggested_reply: prefillReply } : null);
+
+      const composer = el('div', { class: 'inbox-composer' });
+      if (suggestion && suggestion.suggested_reply) {
+        const sbox = el('div', { class: 'inbox-suggestion-box' });
+        sbox.appendChild(el('div', { class: 'sg-label' }, '🤖 Sugestão da IA'));
+        sbox.appendChild(el('div', { style: 'margin:4px 0;font-size:13px' }, suggestion.suggested_reply));
+        composer.appendChild(sbox);
+      }
+      const ta = el('textarea', { placeholder: 'Escreva sua resposta…' });
+      if (prefillReply) ta.value = prefillReply;
+      else if (suggestion && suggestion.suggested_reply) ta.value = suggestion.suggested_reply;
+      composer.appendChild(ta);
+      const acts = el('div', { class: 'inbox-composer-actions' });
+      const sendBtn = el('button', { class: 'btn green' }, 'Enviar resposta');
+      sendBtn.addEventListener('click', async () => {
+        const text = ta.value.trim();
+        if (!text) { toast('Escreva uma mensagem', 'warn'); return; }
+        sendBtn.disabled = true;
+        try {
+          await api('/api/inbox/send', { method: 'POST', body: {
+            pack_id: convo.pack_id, buyer_id: convo.buyer_id, text
+          }});
+          toast('Mensagem enviada', 'ok');
+          openThread(convo);
+          loadInbox();
+        } catch (e) { toast(e.message, 'err'); sendBtn.disabled = false; }
+      });
+      acts.appendChild(sendBtn);
+      composer.appendChild(acts);
+      threadEl.appendChild(composer);
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    } catch (e) {
+      threadEl.innerHTML = `<div class="inbox-empty muted" style="color:var(--danger)">Erro: ${e.message}</div>`;
+    }
+  }
+
+  // ════════════ AI CONFIG ════════════
+  state.aiFaq = [];
+
+  async function loadAIConfig() {
+    try {
+      const cfg = await api('/api/ai/config');
+      if ($('ai-enabled')) $('ai-enabled').checked = !!cfg.enabled;
+      if ($('ai-autoreply')) $('ai-autoreply').checked = !!cfg.auto_reply;
+      if ($('ai-rules')) $('ai-rules').value = cfg.rules || '';
+      const status = $('ai-key-status');
+      if (status) status.textContent = cfg.has_key
+        ? '✓ Chave configurada (deixe em branco para manter)'
+        : '⚠ Nenhuma chave configurada';
+      state.aiFaq = cfg.faq || [];
+      renderAIFaq();
+    } catch (e) { /* silent */ }
+  }
+
+  function renderAIFaq() {
+    const cont = $('ai-faq-list');
+    if (!cont) return;
+    cont.innerHTML = '';
+    if (!state.aiFaq.length) {
+      cont.innerHTML = '<div class="muted small">Nenhuma pergunta cadastrada. Adicione perguntas frequentes e suas respostas.</div>';
+      return;
+    }
+    state.aiFaq.forEach((f, idx) => {
+      const item = el('div', { class: 'ai-faq-item' });
+      const fields = el('div', { class: 'faq-fields' });
+      const qIn = el('input', { placeholder: 'Pergunta (ex: consegue enviar agora?)' });
+      qIn.value = f.q || '';
+      qIn.oninput = () => state.aiFaq[idx].q = qIn.value;
+      const aIn = el('input', { placeholder: 'Resposta oficial' });
+      aIn.value = f.a || '';
+      aIn.oninput = () => state.aiFaq[idx].a = aIn.value;
+      fields.append(qIn, aIn);
+      const del = el('button', { class: 'btn ghost sm', onclick: () => {
+        state.aiFaq.splice(idx, 1); renderAIFaq();
+      }}, '✕');
+      item.append(fields, del);
+      cont.appendChild(item);
+    });
+  }
+
+  async function saveAIConfig() {
+    const body = {
+      enabled: $('ai-enabled')?.checked || false,
+      auto_reply: $('ai-autoreply')?.checked || false,
+      rules: $('ai-rules')?.value || '',
+      faq: state.aiFaq.filter(f => (f.q || '').trim() && (f.a || '').trim()),
+    };
+    const key = $('ai-key')?.value.trim();
+    if (key) body.api_key = key;
+    try {
+      await api('/api/ai/config', { method: 'POST', body });
+      toast('Configuração de IA salva', 'ok');
+      if ($('ai-key')) $('ai-key').value = '';
+      loadAIConfig();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function testAI() {
+    const resultEl = $('ai-test-result');
+    if (resultEl) resultEl.innerHTML = '<span class="muted small">Testando…</span>';
+    try {
+      const r = await api('/api/ai/test', { method: 'POST', body: { question: 'Olá, consegue me enviar o produto agora?' } });
+      if (resultEl) {
+        const modeLabel = { auto: '✅ Responderia automaticamente', suggest: '📝 Geraria sugestão para revisão', skip: '⚠ Passaria para você' }[r.mode] || r.mode;
+        resultEl.innerHTML = `
+          <div class="msg-vars" style="font-size:13px">
+            <div><strong>${modeLabel}</strong></div>
+            <div style="margin-top:6px"><span class="muted">Resposta gerada:</span> ${r.reply || '(nenhuma)'}</div>
+            ${r.reason ? `<div class="muted small" style="margin-top:4px">Motivo: ${r.reason}</div>` : ''}
+          </div>`;
+      }
+    } catch (e) {
+      if (resultEl) resultEl.innerHTML = `<span class="small" style="color:var(--danger)">Erro: ${e.message}</span>`;
+    }
   }
 
 })();

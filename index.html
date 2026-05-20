@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=619">
+<link rel="stylesheet" href="style.css?v=620">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -44,6 +44,7 @@
       <button class="nav-btn" data-screen="mensagens"><span class="nav-icon">✉</span><span>Mensagens</span></button>
       <button class="nav-btn" data-screen="pedidos"><span class="nav-icon">⊙</span><span>Pedidos</span></button>
       <button class="nav-btn" data-screen="fila"><span class="nav-icon">⏳</span><span>Fila</span></button>
+      <button class="nav-btn" data-screen="conversas"><span class="nav-icon">💬</span><span>Conversas</span></button>
       <button class="nav-btn" data-screen="falhas"><span class="nav-icon">⚠</span><span>Falhas</span></button>
       <button class="nav-btn" data-screen="estatisticas"><span class="nav-icon">📊</span><span>Estatísticas</span></button>
       <button class="nav-btn" data-screen="broadcast"><span class="nav-icon">📢</span><span>Broadcast</span></button>
@@ -242,6 +243,24 @@
       </div>
     </section>
 
+    <section class="screen hidden" data-screen="conversas">
+      <div class="screen-head">
+        <h1>Conversas</h1>
+        <p class="muted">Mensagens com seus compradores no Mercado Livre</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn dark" id="btn-load-inbox">↻ Atualizar</button>
+        <span class="muted small" id="inbox-count"></span>
+      </div>
+      <div id="inbox-suggestions-bar"></div>
+      <div class="inbox-layout">
+        <div class="inbox-list scroll-list" id="inbox-list"></div>
+        <div class="inbox-thread" id="inbox-thread">
+          <div class="inbox-empty muted">Selecione uma conversa para ver as mensagens.</div>
+        </div>
+      </div>
+    </section>
+
     <section class="screen hidden" data-screen="falhas">
       <div class="screen-head">
         <h1>Falhas</h1>
@@ -436,6 +455,52 @@
         <div id="clone-progress" style="margin-top:14px"></div>
       </div>
 
+      <!-- AI assistant config -->
+      <div class="block">
+        <div class="block-head"><h2>Assistente de IA (respostas a compradores)</h2></div>
+        <p class="muted small">A IA lê perguntas dos compradores e responde as simples automaticamente, ou sugere uma resposta para você aprovar. Requer uma chave de API da OpenAI (paga, mas barata).</p>
+
+        <div class="ai-row" style="margin-top:12px">
+          <label class="switch-row">
+            <input type="checkbox" id="ai-enabled">
+            <span><strong>Ativar assistente de IA</strong> — processa perguntas dos compradores</span>
+          </label>
+        </div>
+        <div class="ai-row">
+          <label class="switch-row">
+            <input type="checkbox" id="ai-autoreply">
+            <span><strong>Resposta automática</strong> — IA responde sozinha perguntas simples e seguras (as demais viram sugestão)</span>
+          </label>
+        </div>
+
+        <div style="margin-top:14px">
+          <label class="muted small">Chave de API da OpenAI
+            <input type="password" id="ai-key" placeholder="sk-..." style="display:block;width:100%;margin-top:4px">
+          </label>
+          <div class="muted small" id="ai-key-status" style="margin-top:4px"></div>
+        </div>
+
+        <div style="margin-top:14px">
+          <label class="muted small">Regras para a IA (o que ela pode/não pode fazer)</label>
+          <textarea id="ai-rules" rows="4" style="width:100%;margin-top:4px"
+            placeholder="Ex: Nunca prometa reembolso. Se perguntarem de nota fiscal, diga que enviamos por email. Se for reclamação ou defeito, não responda — apenas sinalize para o vendedor."></textarea>
+        </div>
+
+        <div style="margin-top:14px">
+          <div class="block-head">
+            <label class="muted small">Base de conhecimento (perguntas frequentes)</label>
+            <button class="btn green sm" id="btn-ai-addfaq">+ Adicionar</button>
+          </div>
+          <div id="ai-faq-list" style="margin-top:8px"></div>
+        </div>
+
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn green" id="btn-ai-save">Salvar configuração de IA</button>
+          <button class="btn dark" id="btn-ai-test">🧪 Testar IA</button>
+        </div>
+        <div id="ai-test-result" style="margin-top:10px"></div>
+      </div>
+
       <!-- Health -->
       <div class="block">
         <div class="block-head">
@@ -552,6 +617,6 @@
   </div>
 </div>
 
-<script src="app.js?v=619"></script>
+<script src="app.js?v=620"></script>
 </body>
 </html>
