@@ -1624,6 +1624,20 @@
       const h = await api('/api/health');
       const cont = $('health-info');
       const fmt = (b) => b ? '<span style="color:var(--accent)">✓</span>' : '<span style="color:var(--danger)">✗</span>';
+      // Rate limit status
+      let rateLimitRow = '';
+      if (h.rate_until) {
+        const rUntil = new Date(parseInt(h.rate_until));
+        const minsLeft = Math.ceil((parseInt(h.rate_until) - Date.now()) / 60000);
+        if (minsLeft > 0) {
+          rateLimitRow = `
+            <div style="grid-column:1/-1;background:rgba(255,159,10,.12);padding:10px;border-radius:8px;margin:8px 0">
+              <div><span class="muted">⏸ Rate limit ativo:</span> <strong style="color:var(--warning)">${minsLeft} min restantes</strong> (até ${rUntil.toLocaleTimeString('pt-BR')})</div>
+              <button class="btn dark sm" id="btn-clear-ratelimit" style="margin-top:6px">▶ Limpar rate limit</button>
+              <div class="muted small" style="margin-top:4px">⚠ Use só se necessário. Limpar manualmente e voltar a enviar pode disparar novo bloqueio pelo ML.</div>
+            </div>`;
+        }
+      }
       cont.innerHTML = `
         <div><span class="muted">Versão Worker:</span> v${h.version}</div>
         <div><span class="muted">Monitoramento:</span> ${fmt(h.monitoring)} ${h.monitoring ? 'Ativo' : 'Pausado'}</div>
@@ -1631,11 +1645,26 @@
         <div><span class="muted">Auto-refresh:</span> ${fmt(h.auto_refresh_ready)} ${h.auto_refresh_ready ? 'Pronto' : 'Faltando credenciais'}</div>
         <div><span class="muted">Última renovação:</span> ${h.last_refresh_at ? formatDate(h.last_refresh_at) : 'Nunca'}</div>
         <div><span class="muted">Próxima renovação em:</span> ${h.next_proactive_refresh_in_minutes} min</div>
+        ${rateLimitRow}
         <div><span class="muted">Fila total:</span> ${h.queue_size} pedido(s)</div>
         <div><span class="muted">Aguardando chat:</span> ${h.queue_awaiting_chat} pedido(s)</div>
         <div><span class="muted">Prontos para enviar:</span> ${h.queue_ready} pedido(s)</div>
         ${h.last_order ? `<div><span class="muted">Última venda:</span> ${h.last_order.buyer} (${h.last_order.msgs_sent} msgs)</div>` : ''}
       `;
+      // Wire the button if it was rendered
+      const clearBtn = $('btn-clear-ratelimit');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', async () => {
+          if (!await confirm('Limpar rate limit',
+            'Vai liberar imediatamente o envio de mensagens. ⚠ Se o ML ainda estiver bloqueando, ele pode reaplicar o rate limit por mais tempo. Use só quando realmente necessário.',
+            'Limpar agora')) return;
+          try {
+            await api('/api/rate_limit/clear', { method: 'POST' });
+            toast('Rate limit limpo', 'ok');
+            loadHealth();
+          } catch (e) { toast(e.message, 'err'); }
+        });
+      }
     } catch (e) { /* silent */ }
   }
 
