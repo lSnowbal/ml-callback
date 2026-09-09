@@ -1987,8 +1987,10 @@
       }
       queue.forEach(q => {
         const tr = el('tr');
-        tr.appendChild(el('td', {}, q.order_id));
-        tr.appendChild(el('td', {}, q.buyer || '—'));
+        tr.appendChild(el('td', {}, q.is_template ? 'Template' : q.order_id));
+        const buyerCell = el('td', {}, q.buyer || '—');
+        if (q.recovered) buyerCell.appendChild(el('span', { class: 'tag pending', style: 'margin-left:6px' }, '🛟 recuperado'));
+        tr.appendChild(buyerCell);
         tr.appendChild(el('td', {}, `${q.total_msgs - q.msgs_remaining}/${q.total_msgs}`));
         // Status
         let status;
@@ -2159,6 +2161,10 @@
           loadInbox();
         } catch (e) { toast(e.message, 'err'); sendBtn.disabled = false; }
       });
+      // "Enviar template" — enfileira o template com o mesmo fluxo de pausas
+      const tplBtn = el('button', { class: 'btn dark' }, '📋 Enviar template');
+      tplBtn.addEventListener('click', () => openTemplatePicker(convo));
+      acts.appendChild(tplBtn);
       acts.appendChild(sendBtn);
       composer.appendChild(acts);
       threadEl.appendChild(composer);
@@ -2166,6 +2172,58 @@
     } catch (e) {
       threadEl.innerHTML = `<div class="inbox-empty muted" style="color:var(--danger)">Erro: ${e.message}</div>`;
     }
+  }
+
+  // ─── Enviar template numa conversa (entra na fila, com pausas) ───
+  async function openTemplatePicker(convo) {
+    let lib = {};
+    try { lib = await api('/api/templates'); } catch (e) { toast(e.message, 'err'); return; }
+    const names = Object.keys(lib || {});
+    if (!names.length) {
+      toast('Nenhum template salvo. Crie um em Mensagens → Novo template.', 'warn');
+      return;
+    }
+    const body = el('div');
+    body.appendChild(el('p', { class: 'muted small' },
+      'O template entra na fila e é enviado com as mesmas pausas do envio automático (não dispara tudo de uma vez).'));
+    const sel = el('select', { style: 'width:100%;margin:10px 0' });
+    names.forEach(n => sel.appendChild(el('option', { value: n }, `${n} (${(lib[n] || []).length} msg)`)));
+    body.appendChild(sel);
+    const preview = el('div', { class: 'msg-vars', style: 'font-size:13px;white-space:pre-wrap;max-height:200px;overflow:auto' });
+    const renderPreview = () => {
+      const msgs = lib[sel.value] || [];
+      preview.textContent = msgs.map((m, i) => `${i + 1}. ${m}`).join('\n\n') || '(vazio)';
+    };
+    sel.onchange = renderPreview; renderPreview();
+    body.appendChild(preview);
+
+    if (!await confirmNode(`Enviar template para ${convo.buyer || 'comprador'}`, body, 'Enfileirar e enviar')) return;
+    try {
+      const r = await api('/api/inbox/send_template', { method: 'POST', body: {
+        pack_id: convo.pack_id, buyer_id: convo.buyer_id, buyer: convo.buyer,
+        order_id: convo.order_id, item_id: convo.item_id, template: sel.value,
+      }});
+      toast(`Template na fila — ${r.queued} mensagem(ns) sairão com pausas`, 'ok');
+      setTimeout(() => openThread(convo), 4000);
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  // Variante de confirm() que aceita um nó DOM como corpo (reusa o mesmo modal)
+  function confirmNode(title, node, okLabel) {
+    return new Promise(resolve => {
+      const t = $('modal-title'), b = $('modal-body'), a = $('modal-actions'), m = $('modal');
+      if (!t || !b || !a || !m) { resolve(window.confirm(title)); return; }
+      t.textContent = title;
+      b.innerHTML = '';
+      b.appendChild(node);
+      a.innerHTML = '';
+      const close = v => { m.classList.add('hidden'); b.innerHTML = ''; resolve(v); };
+      a.append(
+        el('button', { class: 'btn ghost', onclick: () => close(false) }, 'Cancelar'),
+        el('button', { class: 'btn blue', onclick: () => close(true) }, okLabel || 'Confirmar')
+      );
+      m.classList.remove('hidden');
+    });
   }
 
   // ════════════ AI CONFIG ════════════
