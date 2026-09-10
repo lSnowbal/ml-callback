@@ -772,3 +772,15 @@ body { background: var(--bg-grad); }
   .inbox-thread { min-height: 420px; max-height: 70vh; }
   .inbox-list.thread-open { display: none; }
 }
+
+/* ─── Mapa de calor ─── */
+.heatmap-table { border-collapse: collapse; font-size: 11px; }
+.heatmap-table th { color: var(--muted); font-weight: 500; padding: 2px 4px; text-align: center; }
+.heatmap-table tbody th { text-align: right; padding-right: 8px; }
+.heatmap-table td {
+  width: 26px; height: 22px; text-align: center;
+  border: 1px solid var(--border); border-radius: 3px; color: var(--text);
+}
+/* ─── Respostas rápidas no chat ─── */
+.qr-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.qr-row .btn { white-space: nowrap; }

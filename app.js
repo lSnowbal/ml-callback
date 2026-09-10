@@ -187,6 +187,9 @@
       if (name === 'estatisticas') renderStats();
       if (name === 'fila') loadQueue();
       if (name === 'conversas') loadInbox();
+      if (name === 'clonar') initCloneSection();
+      if (name === 'logs') loadFullLogs();
+      if (name === 'chaves') initKeysScreen();
     } catch (e) { console.error(`[switchScreen ${name}]`, e); }
   }
 
@@ -218,6 +221,14 @@
     bind('btn-clearlog', 'click', () => danger('/api/logs/clear', 'Limpar logs', 'Apaga apenas o histórico de mensagens do log de atividade.'));
 
     bind('btn-loadprods', 'click', loadProducts);
+    bind('btn-prod-csv-export', 'click', exportProductsCSV);
+    bind('btn-prod-csv-import', 'click', () => $('prod-csv-file')?.click());
+    bind('prod-csv-file', 'change', e => { const f = e.target.files?.[0]; if (f) importProductsCSV(f); e.target.value = ''; });
+    bind('btn-log-refresh', 'click', loadFullLogs);
+    bind('btn-log-export', 'click', exportLogs);
+    bind('log-search', 'input', renderFullLogs);
+    bind('log-filter', 'change', renderFullLogs);
+    bind('log-autorefresh', 'change', e => { if (e.target.checked) loadFullLogs(); else clearTimeout(state.logTimer); });
     bind('prod-search', 'input', renderProducts);
     bind('prod-filter', 'change', renderProducts);
     bind('prod-selectall', 'change', e => {
@@ -1119,11 +1130,54 @@
     } catch (e) { toast(e.message, 'err'); }
   }
 
+  // ─── Mapa de calor: dia da semana × hora ───
+  function renderHeatmap() {
+    const cont = $('heatmap');
+    if (!cont) return;
+    const orders = state.orders || [];
+    if (!orders.length) {
+      cont.innerHTML = '<div class="muted small">Sem vendas registradas ainda.</div>';
+      return;
+    }
+    const dias = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    let max = 0;
+    orders.forEach(o => {
+      const d = new Date(o.created_at);
+      if (isNaN(d)) return;
+      const v = ++grid[d.getDay()][d.getHours()];
+      if (v > max) max = v;
+    });
+    if (!max) { cont.innerHTML = '<div class="muted small">Sem datas válidas no histórico.</div>'; return; }
+    let html = '<table class="heatmap-table"><thead><tr><th></th>';
+    for (let h = 0; h < 24; h++) html += `<th>${String(h).padStart(2, '0')}</th>`;
+    html += '</tr></thead><tbody>';
+    grid.forEach((row, di) => {
+      html += `<tr><th>${dias[di]}</th>`;
+      row.forEach((v, h) => {
+        const pct = v / max;
+        const bg = v === 0 ? 'transparent' : `color-mix(in srgb, var(--accent) ${Math.round(15 + pct * 85)}%, transparent)`;
+        html += `<td title="${dias[di]} ${String(h).padStart(2,'0')}h — ${v} venda(s)" style="background:${bg}">${v || ''}</td>`;
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    const best = [];
+    grid.forEach((row, di) => row.forEach((v, h) => best.push({ di, h, v })));
+    best.sort((x, y) => y.v - x.v);
+    const top = best.slice(0, 3).filter(b => b.v > 0)
+      .map(b => `${dias[b.di]} ${String(b.h).padStart(2, '0')}h (${b.v})`).join(' · ');
+    if (top) html += `<div class="muted small" style="margin-top:8px">Picos: ${top}</div>`;
+    cont.innerHTML = html;
+  }
+
   async function renderStats() {
     if (state.currentScreen !== 'estatisticas') return;
     try {
       const daily = await api('/api/stats/daily');
       const orders = state.orders.length ? state.orders : await api('/api/orders');
+      state.orders = orders;
+      renderHeatmap();
 
       const totalOrders = orders.length;
       const totalMsgs = orders.reduce((s,o) => s + (o.msgs_sent || 0), 0);
@@ -1132,7 +1186,16 @@
       const expectedMsgs = totalOrders * 4;
       $('kpi-success').textContent = expectedMsgs ? Math.round(totalMsgs / expectedMsgs * 100) + '%' : '—';
       $('kpi-conv').textContent = totalOrders ? Math.round(totalConfirmed / totalOrders * 100) + '%' : '—';
-      $('kpi-avg').textContent = '~' + (Math.floor(Math.random() * 60) + 30) + 's';
+      // Tempo real entre a venda entrar na fila e a 1ª mensagem sair.
+      const timed = (state.orders || []).filter(o => Number(o.first_msg_ms) > 0);
+      if (timed.length) {
+        const avgMs = timed.reduce((a2, o) => a2 + Number(o.first_msg_ms), 0) / timed.length;
+        $('kpi-avg').textContent = avgMs < 60000
+          ? `${Math.round(avgMs / 1000)}s`
+          : `${(avgMs / 60000).toFixed(1)}min`;
+      } else {
+        $('kpi-avg').textContent = '—';
+      }
 
       drawChart(daily);
     } catch (e) { /* silent */ }
@@ -1473,8 +1536,9 @@
     loadVacationStatus();
     loadNotificationPrefs();
     renderAccentPicker();
-    initCloneSection();
     loadAIConfig();
+    loadQuickReplies();
+    loadTelegram();
   }
 
   // ─── Clone listings between accounts ────────────────────────────
@@ -1651,6 +1715,26 @@
         <div><span class="muted">Prontos para enviar:</span> ${h.queue_ready} pedido(s)</div>
         ${h.last_order ? `<div><span class="muted">Última venda:</span> ${h.last_order.buyer} (${h.last_order.msgs_sent} msgs)</div>` : ''}
       `;
+      // Consumo de operações KV do dia (o recurso escasso do plano gratuito)
+      try {
+        const u = await api('/api/kv_usage');
+        const bar = (used, lim) => {
+          const pct = Math.min(100, Math.round(used / lim * 100));
+          const cor = pct >= 80 ? 'var(--danger)' : pct >= 50 ? 'var(--warning, #e0a82e)' : 'var(--accent)';
+          return `<div style="margin:4px 0">
+            <div class="muted small">${used.toLocaleString('pt-BR')} de ${lim.toLocaleString('pt-BR')} (${pct}%)</div>
+            <div style="background:var(--surface-2);border-radius:6px;height:6px;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:${cor}"></div></div></div>`;
+        };
+        cont.innerHTML += `
+          <div style="grid-column:1/-1;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            <div class="muted small" style="margin-bottom:6px"><strong>Consumo KV hoje</strong> — estimativa do próprio Worker</div>
+            <div><span class="muted small">Listagens (limite crítico)</span>${bar(u.lists, u.limits.lists)}</div>
+            <div><span class="muted small">Escritas</span>${bar(u.writes, u.limits.writes)}</div>
+            <div><span class="muted small">Leituras</span>${bar(u.reads, u.limits.reads)}</div>
+          </div>`;
+      } catch { /* silent */ }
+
       // Wire the button if it was rendered
       const clearBtn = $('btn-clear-ratelimit');
       if (clearBtn) {
@@ -1855,6 +1939,47 @@
     on('btn-load-inbox', 'click', loadInbox);
     on('btn-ai-save', 'click', saveAIConfig);
     on('btn-ai-test', 'click', testAI);
+    on('btn-qr-add', 'click', () => { state.quickReplies.push({ label: '', text: '' }); renderQuickRepliesConfig(); });
+    on('btn-qr-save', 'click', saveQuickReplies);
+    on('btn-tg-connect', 'click', connectTelegram);
+    on('btn-tg-test', 'click', async () => {
+      try { await api('/api/telegram/test', { method: 'POST' }); toast('Enviado — confira o Telegram', 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+    });
+    on('btn-tg-off', 'click', async () => {
+      if (!await confirm('Desconectar Telegram', 'Os alertas deixam de ser enviados e o token é apagado.', 'Desconectar', true)) return;
+      try { await api('/api/telegram', { method: 'POST', body: { clear: true } }); toast('Desconectado', 'ok'); loadTelegram(); }
+      catch (e) { toast(e.message, 'err'); }
+    });
+    on('btn-tg-save', 'click', saveTelegramAlerts);
+    on('keys-product', 'change', loadKeys);
+    on('keys-mode', 'change', applyKeysModeUI);
+    on('btn-keys-reload', 'click', () => { loadKeys(); loadKeysSummary(); });
+    on('btn-keys-savemode', 'click', saveKeysMode);
+    on('btn-keys-add', 'click', addKeys);
+    on('btn-keys-clean', 'click', async () => {
+      const itemId = $('keys-product')?.value;
+      if (!await confirm('Limpar usadas', 'Remove do histórico as chaves já entregues. As disponíveis não são afetadas.', 'Limpar')) return;
+      try { const r = await api('/api/keys/delete', { method: 'POST', body: { item_id: itemId, delete_used: true } });
+        toast(`${r.deleted} chave(s) removida(s)`, 'ok'); loadKeys(); }
+      catch (e) { toast(e.message, 'err'); }
+    });
+    on('ai-provider', 'change', () => {
+      applyAIProviderUI();
+      const prov = $('ai-provider').value;
+      const first = (AI_PRESETS[prov] || [])[0];
+      if (first) {
+        if ($('ai-model')) $('ai-model').value = first.model || '';
+        if ($('ai-baseurl') && first.base) $('ai-baseurl').value = first.base;
+      }
+    });
+    on('ai-preset', 'change', e => {
+      const prov = $('ai-provider')?.value;
+      const pr = (AI_PRESETS[prov] || [])[parseInt(e.target.value)];
+      if (!pr) return;
+      if ($('ai-model')) $('ai-model').value = pr.model || '';
+      if ($('ai-baseurl') && pr.base) $('ai-baseurl').value = pr.base;
+    });
     on('btn-ai-addfaq', 'click', () => {
       state.aiFaq.push({ q: '', a: '' });
       renderAIFaq();
@@ -2040,6 +2165,347 @@
     } catch (e) { toast(e.message, 'err'); }
   }
 
+  // ════════════ LOGS ════════════
+  state.fullLogs = [];
+
+  async function loadFullLogs() {
+    const box = $('log-full');
+    if (!box) return;
+    try {
+      const st = await api('/api/status');
+      state.fullLogs = st.logs || [];
+      renderFullLogs();
+      if ($('log-autorefresh')?.checked && state.currentScreen === 'logs') {
+        clearTimeout(state.logTimer);
+        state.logTimer = setTimeout(loadFullLogs, 15000);
+      }
+    } catch (e) {
+      box.innerHTML = `<div class="muted small" style="color:var(--danger)">Erro: ${e.message}</div>`;
+    }
+  }
+
+  function renderFullLogs() {
+    const box = $('log-full');
+    if (!box) return;
+    const q = ($('log-search')?.value || '').toLowerCase();
+    const f = $('log-filter')?.value || '';
+    let lines = state.fullLogs;
+    if (q) lines = lines.filter(l => String(l).toLowerCase().includes(q));
+    if (f) { const re = new RegExp(f); lines = lines.filter(l => re.test(String(l))); }
+    const cnt = $('log-count');
+    if (cnt) cnt.textContent = `${lines.length} de ${state.fullLogs.length} linha(s)`;
+    box.innerHTML = '';
+    if (!lines.length) {
+      box.innerHTML = '<div class="muted small" style="padding:16px;text-align:center">Nada encontrado.</div>';
+      return;
+    }
+    lines.forEach(l => box.appendChild(el('div', { class: 'log-line' }, l)));
+  }
+
+  function exportLogs() {
+    const q = ($('log-search')?.value || '').toLowerCase();
+    const lines = q ? state.fullLogs.filter(l => String(l).toLowerCase().includes(q)) : state.fullLogs;
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `ml-sender-logs-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ════════════ CSV DE PRODUTOS ════════════
+  function exportProductsCSV() {
+    if (!state.products.length) { toast('Carregue os produtos primeiro', 'warn'); return; }
+    const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['id', 'title', 'enabled', 'delay_min', 'delay_max', 'product_key', 'msg1', 'msg2', 'msg3', 'msg4'];
+    const rows = state.products.map(p => {
+      const msgs = (state.messages && state.messages[p.id]) || p.messages || [];
+      return [p.id, p.title || '', p.enabled ? 1 : 0, p.delay_min ?? 15, p.delay_max ?? 90,
+              p.product_key || '', msgs[0] || '', msgs[1] || '', msgs[2] || '', msgs[3] || ''].map(esc).join(',');
+    });
+    const blob = new Blob(['\ufeff' + [head.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `produtos-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // Parser de CSV que respeita aspas e quebras de linha dentro do campo
+  function parseCSV(text) {
+    const rows = []; let row = [], cur = '', inQ = false;
+    text = text.replace(/^\ufeff/, '');
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQ) {
+        if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+        else cur += c;
+      } else if (c === '"') inQ = true;
+      else if (c === ',' || c === ';') { row.push(cur); cur = ''; }
+      else if (c === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+      else if (c !== '\r') cur += c;
+    }
+    if (cur.length || row.length) { row.push(cur); rows.push(row); }
+    return rows.filter(r => r.some(c => String(c).trim()));
+  }
+
+  async function importProductsCSV(file) {
+    try {
+      const rows = parseCSV(await file.text());
+      if (rows.length < 2) { toast('CSV vazio ou sem linhas de dados', 'err'); return; }
+      const head = rows[0].map(h => h.trim().toLowerCase());
+      const col = n => head.indexOf(n);
+      if (col('id') < 0) { toast('CSV precisa ter a coluna "id"', 'err'); return; }
+      const items = rows.slice(1).map(r => {
+        const get = n => { const i = col(n); return i >= 0 ? r[i] : undefined; };
+        const msgs = ['msg1', 'msg2', 'msg3', 'msg4'].map(get).filter(x => x && String(x).trim());
+        const it = { id: (get('id') || '').trim() };
+        const en = get('enabled');
+        if (en !== undefined && String(en).trim() !== '') it.enabled = ['1', 'true', 'sim', 'yes'].includes(String(en).trim().toLowerCase());
+        if (get('delay_min') !== undefined && String(get('delay_min')).trim() !== '') it.delay_min = Number(get('delay_min'));
+        if (get('delay_max') !== undefined && String(get('delay_max')).trim() !== '') it.delay_max = Number(get('delay_max'));
+        if (get('product_key') !== undefined && String(get('product_key')).trim() !== '') it.product_key = get('product_key');
+        if (msgs.length) it.messages = msgs;
+        return it;
+      }).filter(i => i.id);
+      if (!items.length) { toast('Nenhuma linha válida no CSV', 'err'); return; }
+      if (!await confirm('Importar CSV',
+        `Vai atualizar ${items.length} anúncio(s) com os dados do arquivo. Anúncios que não existirem na conta são ignorados. Esta ação sobrescreve mensagens e delays dos anúncios listados.`,
+        'Importar')) return;
+      const r = await api('/api/products/bulk_import', { method: 'POST', body: { items } });
+      toast(`${r.updated} anúncio(s) atualizado(s)${r.skipped_count ? ` · ${r.skipped_count} ignorado(s)` : ''}`, 'ok');
+      loadProducts();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  // ════════════ RESPOSTAS RÁPIDAS ════════════
+  state.quickReplies = [];
+
+  async function loadQuickReplies() {
+    try { state.quickReplies = await api('/api/quick_replies'); } catch { state.quickReplies = []; }
+    renderQuickRepliesConfig();
+  }
+
+  function renderQuickRepliesConfig() {
+    const cont = $('qr-list');
+    if (!cont) return;
+    cont.innerHTML = '';
+    if (!state.quickReplies.length) {
+      cont.innerHTML = '<div class="muted small">Nenhuma resposta rápida. Ex.: "Envio imediato" → "Sim! A entrega é automática e imediata."</div>';
+      return;
+    }
+    state.quickReplies.forEach((qr, i) => {
+      const item = el('div', { class: 'ai-faq-item' });
+      const fields = el('div', { class: 'faq-fields' });
+      const l = el('input', { placeholder: 'Rótulo do botão (ex: Envio imediato)' });
+      l.value = qr.label || ''; l.oninput = () => state.quickReplies[i].label = l.value;
+      const t = el('input', { placeholder: 'Texto que será enviado' });
+      t.value = qr.text || ''; t.oninput = () => state.quickReplies[i].text = t.value;
+      fields.append(l, t);
+      const del = el('button', { class: 'btn ghost sm', onclick: () => { state.quickReplies.splice(i, 1); renderQuickRepliesConfig(); } }, '✕');
+      item.append(fields, del);
+      cont.appendChild(item);
+    });
+  }
+
+  async function saveQuickReplies() {
+    try {
+      const r = await api('/api/quick_replies', { method: 'POST', body: { items: state.quickReplies } });
+      toast(`${r.count} resposta(s) rápida(s) salva(s)`, 'ok');
+      loadQuickReplies();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+
+  // ════════════ TELEGRAM ════════════
+  const TG_ALERTS = [
+    ['new_question', 'Pergunta de comprador'],
+    ['claim', 'Reclamação aberta'],
+    ['token_fail', 'Falha ao renovar token'],
+    ['rate_limit', 'Rate limit do ML'],
+    ['recovered', 'Pedido recuperado'],
+    ['key_low', 'Estoque de chaves baixo'],
+    ['watchdog', 'Verificação de saúde'],
+    ['daily_summary', 'Resumo diário'],
+  ];
+  state.tgAlerts = {};
+
+  async function loadTelegram() {
+    try {
+      const tg = await api('/api/telegram');
+      state.tgAlerts = tg.alerts || {};
+      const st = $('tg-status');
+      if (st) st.textContent = tg.enabled && tg.chat_id
+        ? `✓ Conectado (chat ${tg.chat_id})`
+        : (tg.has_token ? '⚠ Token salvo, mas não conectado — envie /start no bot e clique em Conectar' : '⚠ Não configurado');
+      const box = $('tg-alerts');
+      if (box) {
+        box.innerHTML = '<div class="muted small" style="margin-bottom:6px">Quais alertas receber:</div>';
+        TG_ALERTS.forEach(([k, label]) => {
+          const row = el('label', { class: 'switch-row' });
+          const cb = el('input', { type: 'checkbox' });
+          cb.checked = state.tgAlerts[k] !== false;
+          cb.onchange = () => state.tgAlerts[k] = cb.checked;
+          row.append(cb, el('span', {}, label));
+          box.appendChild(row);
+        });
+      }
+      const bk = $('tg-backup-info');
+      if (bk) bk.textContent = tg.last_backup
+        ? `📦 Último backup semanal enviado em ${new Date(Number(tg.last_backup)).toLocaleString('pt-BR')}`
+        : '📦 O backup semanal começa a ser enviado assim que o Telegram estiver conectado.';
+    } catch (e) { /* silent */ }
+  }
+
+  async function connectTelegram() {
+    const token = $('tg-token')?.value.trim();
+    try {
+      const r = await api('/api/telegram/connect', { method: 'POST', body: token ? { token } : {} });
+      toast(`Conectado${r.name ? ' — ' + r.name : ''}. Veja a mensagem no Telegram.`, 'ok');
+      if ($('tg-token')) $('tg-token').value = '';
+      loadTelegram();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function saveTelegramAlerts() {
+    try {
+      await api('/api/telegram', { method: 'POST', body: { alerts: state.tgAlerts } });
+      toast('Alertas salvos', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  // ════════════ CHAVES DE PRODUTO ════════════
+  state.keysItem = null;
+
+  async function initKeysScreen() {
+    const sel = $('keys-product');
+    if (!sel) return;
+    if (!state.products.length) {
+      try { state.products = await api('/api/products'); } catch (e) { toast(e.message, 'err'); return; }
+    }
+    if (!sel.options.length) {
+      state.products.forEach(p => sel.appendChild(el('option', { value: p.id },
+        `${(p.title || p.id).slice(0, 60)}`)));
+    }
+    if (!state.keysItem) state.keysItem = sel.value || state.products[0]?.id;
+    sel.value = state.keysItem;
+    loadKeys();
+    loadKeysSummary();
+  }
+
+  async function loadKeysSummary() {
+    try {
+      const sum = await api('/api/keys/summary');
+      const box = $('keys-summary');
+      if (!box) return;
+      if (!sum.length) { box.textContent = 'Nenhum anúncio usando estoque de chaves ainda.'; return; }
+      const low = sum.filter(s => s.low).length;
+      box.textContent = `${sum.length} anúncio(s) com estoque` + (low ? ` · ⚠ ${low} com pouca chave` : '');
+    } catch { /* silent */ }
+  }
+
+  function applyKeysModeUI() {
+    const mode = $('keys-mode')?.value || 'fixed';
+    const show = (id, on) => { const e = $(id); if (e) e.classList.toggle('hidden', !on); };
+    show('keys-fixed-row', mode === 'fixed');
+    show('keys-days-row', mode === 'rotate');
+    show('keys-uses-row', mode === 'rotate');
+    show('keys-stock-block', mode !== 'fixed');
+    const hint = $('keys-mode-hint');
+    if (hint) hint.textContent = {
+      fixed: 'A mesma chave é enviada em toda venda. É o comportamento atual do sistema.',
+      rotate: 'O sistema usa uma chave por vez. Quando ela atinge o limite de dias ou de vendas, passa sozinho para a próxima do estoque.',
+      pool: 'Cada venda consome uma chave diferente do estoque. Quando acaba, o anúncio é pausado automaticamente.',
+    }[mode] || '';
+  }
+
+  async function loadKeys() {
+    const itemId = $('keys-product')?.value;
+    if (!itemId) return;
+    state.keysItem = itemId;
+    try {
+      const d = await api(`/api/keys?item_id=${encodeURIComponent(itemId)}`);
+      if ($('keys-mode')) $('keys-mode').value = d.mode || 'fixed';
+      if ($('keys-fixed')) $('keys-fixed').value = d.product_key || '';
+      if ($('keys-days')) $('keys-days').value = d.max_days || 0;
+      if ($('keys-uses')) $('keys-uses').value = d.max_uses || 0;
+      if ($('keys-low')) $('keys-low').value = d.low_threshold ?? 3;
+      applyKeysModeUI();
+      const st = $('keys-stats');
+      if (st) st.innerHTML = `
+        <div><span class="muted">Disponíveis:</span> <strong style="color:var(--accent)">${d.stats.available}</strong></div>
+        <div><span class="muted">Em uso:</span> <strong>${d.stats.active}</strong></div>
+        <div><span class="muted">Já usadas:</span> <strong>${d.stats.used}</strong></div>
+        <div><span class="muted">Total:</span> <strong>${d.stats.total}</strong></div>`;
+      const list = $('keys-list');
+      if (list) {
+        list.innerHTML = '';
+        if (!d.keys.length) {
+          list.innerHTML = '<div class="muted small" style="padding:14px;text-align:center">Nenhuma chave cadastrada.</div>';
+        } else {
+          d.keys.forEach(k => {
+            const row = el('div', { class: 'msg-prod-row' });
+            const info = el('div', { class: 'msg-prod-info' });
+            info.appendChild(el('div', { class: 'msg-prod-title' }, k.key));
+            const tag = k.status === 'available' ? '🟢 disponível'
+                      : k.status === 'active' ? `🔵 em uso (${k.uses} venda(s))`
+                      : `⚫ usada${k.order_id ? ' · pedido ' + k.order_id : ''}`;
+            info.appendChild(el('div', { class: 'msg-prod-meta' }, el('span', {}, tag)));
+            const del = el('button', { class: 'btn ghost sm', onclick: async () => {
+              if (!await confirm('Remover chave', `Remover "${k.key}" do estoque?`, 'Remover', true)) return;
+              try { await api('/api/keys/delete', { method: 'POST', body: { item_id: itemId, key_id: k.id } }); loadKeys(); }
+              catch (e) { toast(e.message, 'err'); }
+            }}, '✕');
+            row.append(el('span', {}), info, del);
+            list.appendChild(row);
+          });
+        }
+      }
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function saveKeysMode() {
+    const itemId = $('keys-product')?.value;
+    if (!itemId) return;
+    try {
+      await api('/api/keys/mode', { method: 'POST', body: {
+        item_id: itemId,
+        mode: $('keys-mode')?.value,
+        max_days: Number($('keys-days')?.value || 0),
+        max_uses: Number($('keys-uses')?.value || 0),
+        low_threshold: Number($('keys-low')?.value || 0),
+        product_key: $('keys-fixed')?.value || '',
+      }});
+      toast('Configuração salva', 'ok');
+      loadKeys(); loadKeysSummary();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function addKeys() {
+    const itemId = $('keys-product')?.value;
+    const raw = $('keys-input')?.value || '';
+    const keys = raw.split(/[\r\n;]+/).map(k => k.trim()).filter(Boolean);
+    if (!keys.length) { toast('Cole ao menos uma chave', 'warn'); return; }
+    try {
+      const r = await api('/api/keys/add', { method: 'POST', body: { item_id: itemId, keys } });
+      toast(`${r.added} chave(s) adicionada(s)${r.duplicates ? ` · ${r.duplicates} duplicada(s) ignorada(s)` : ''}`, 'ok');
+      if ($('keys-input')) $('keys-input').value = '';
+      loadKeys(); loadKeysSummary();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function loadAgentStatus() {
+    const box = $('ai-agent-status');
+    if (!box) return;
+    try {
+      const st = await api('/api/ai/agent/status');
+      box.textContent = st.online
+        ? `🟢 online · ${st.pending} na fila · ${st.done_24h} respondidas em 24h`
+        : (st.last_seen ? `🔴 offline desde ${new Date(st.last_seen).toLocaleString('pt-BR')} · ${st.pending} na fila`
+                        : '🔴 nunca conectou');
+    } catch { box.textContent = ''; }
+  }
+
   // ════════════ INBOX / CONVERSAS ════════════
   state.inboxActivePack = null;
 
@@ -2143,6 +2609,18 @@
         composer.appendChild(sbox);
       }
       const ta = el('textarea', { placeholder: 'Escreva sua resposta…' });
+      // Respostas rápidas: um clique preenche o campo (sem IA, sem custo)
+      const qrs = data.quick_replies || state.quickReplies || [];
+      if (qrs.length) {
+        const qrRow = el('div', { class: 'qr-row' });
+        qrs.forEach(q => {
+          qrRow.appendChild(el('button', {
+            class: 'btn ghost sm', title: q.text,
+            onclick: () => { ta.value = q.text; ta.focus(); }
+          }, q.label));
+        });
+        composer.appendChild(qrRow);
+      }
       if (prefillReply) ta.value = prefillReply;
       else if (suggestion && suggestion.suggested_reply) ta.value = suggestion.suggested_reply;
       composer.appendChild(ta);
@@ -2229,16 +2707,74 @@
   // ════════════ AI CONFIG ════════════
   state.aiFaq = [];
 
+  const AI_PRESETS = {
+    workers_ai: [
+      { label: 'Llama 3.1 8B (rápido, equilibrado)', model: '@cf/meta/llama-3.1-8b-instruct' },
+      { label: 'Llama 3.3 70B (mais capaz, mais lento)', model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' },
+      { label: 'Mistral 7B', model: '@cf/mistral/mistral-7b-instruct-v0.2' },
+    ],
+    openai_compat: [
+      { label: 'Ollama local (via túnel)', base: 'https://SEU-TUNEL/v1', model: 'llama3.1:8b' },
+      { label: 'LM Studio local (via túnel)', base: 'https://SEU-TUNEL/v1', model: 'local-model' },
+      { label: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+      { label: 'Qwen (Alibaba)', base: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+      { label: 'Kimi (Moonshot)', base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+      { label: 'GLM (Zhipu)', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+      { label: 'Groq', base: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
+    ],
+    openai: [
+      { label: 'gpt-4o-mini (barato)', model: 'gpt-4o-mini' },
+      { label: 'gpt-4o', model: 'gpt-4o' },
+    ],
+    anthropic: [
+      { label: 'Claude Haiku (barato e rápido)', model: 'claude-haiku-4-5-20251001' },
+      { label: 'Claude Sonnet', model: 'claude-sonnet-4-5' },
+    ],
+  };
+  const AI_HINTS = {
+    workers_ai: 'Roda dentro da própria Cloudflare, com cota diária gratuita. Exige o binding "AI" no Worker (Settings → Bindings → Workers AI). Não precisa de chave nem de PC ligado.',
+    openai_compat: 'Qualquer serviço que fale o protocolo da OpenAI. Para IA local, o PC precisa ficar ligado e acessível pela internet (Cloudflare Tunnel). Modelos pequenos erram mais o formato — nesse caso a resposta vira sugestão em vez de envio automático.',
+    openai: 'Serviço pago por uso. Custa frações de centavo por resposta no seu volume.',
+    anthropic: 'Serviço pago por uso, com endpoint próprio. A assinatura do Claude Pro não serve aqui — é preciso chave da API.',
+    local_agent: 'A IA roda no seu PC com Ollama. Um agente busca as perguntas aqui — sem túnel, sem porta aberta, sem IP fixo. Com o PC desligado, as perguntas viram sugestões no Inbox.',
+  };
+
+  function applyAIProviderUI() {
+    const prov = $('ai-provider')?.value || 'openai';
+    const show = (id, on) => { const e = $(id); if (e) e.classList.toggle('hidden', !on); };
+    show('ai-baseurl-row', prov === 'openai_compat');
+    show('ai-key-row', prov !== 'workers_ai' && prov !== 'local_agent');
+    show('ai-agent-box', prov === 'local_agent');
+    if (prov === 'local_agent') loadAgentStatus();
+    show('ai-preset-row', true);
+    const hint = $('ai-provider-hint');
+    if (hint) hint.textContent = AI_HINTS[prov] || '';
+    const sel = $('ai-preset');
+    if (sel) {
+      sel.innerHTML = '<option value="">— escolher preset —</option>';
+      (AI_PRESETS[prov] || []).forEach((pr, i) =>
+        sel.appendChild(el('option', { value: String(i) }, pr.label)));
+    }
+  }
+
   async function loadAIConfig() {
     try {
       const cfg = await api('/api/ai/config');
       if ($('ai-enabled')) $('ai-enabled').checked = !!cfg.enabled;
       if ($('ai-autoreply')) $('ai-autoreply').checked = !!cfg.auto_reply;
       if ($('ai-rules')) $('ai-rules').value = cfg.rules || '';
+      if ($('ai-provider')) $('ai-provider').value = cfg.provider || 'openai';
+      if ($('ai-baseurl')) $('ai-baseurl').value = cfg.base_url || '';
+      if ($('ai-model')) $('ai-model').value = cfg.model || '';
+      applyAIProviderUI();
       const status = $('ai-key-status');
       if (status) status.textContent = cfg.has_key
         ? '✓ Chave configurada (deixe em branco para manter)'
         : '⚠ Nenhuma chave configurada';
+      const provHint = $('ai-provider-hint');
+      if (provHint && (cfg.provider || 'openai') === 'workers_ai' && !cfg.workers_ai_available) {
+        provHint.textContent = '⚠ O binding "AI" ainda NÃO está ativo neste Worker. Adicione em Cloudflare → seu Worker → Settings → Bindings → Workers AI.';
+      }
       state.aiFaq = cfg.faq || [];
       renderAIFaq();
     } catch (e) { /* silent */ }
@@ -2276,6 +2812,9 @@
       auto_reply: $('ai-autoreply')?.checked || false,
       rules: $('ai-rules')?.value || '',
       faq: state.aiFaq.filter(f => (f.q || '').trim() && (f.a || '').trim()),
+      provider: $('ai-provider')?.value || 'openai',
+      base_url: $('ai-baseurl')?.value || '',
+      model: $('ai-model')?.value || '',
     };
     const key = $('ai-key')?.value.trim();
     if (key) body.api_key = key;
@@ -2291,7 +2830,13 @@
     const resultEl = $('ai-test-result');
     if (resultEl) resultEl.innerHTML = '<span class="muted small">Testando…</span>';
     try {
-      const r = await api('/api/ai/test', { method: 'POST', body: { question: 'Olá, consegue me enviar o produto agora?' } });
+      const r = await api('/api/ai/test', { method: 'POST', body: {
+        question: 'Olá, consegue me enviar o produto agora?',
+        provider: $('ai-provider')?.value || undefined,
+        base_url: $('ai-baseurl')?.value || undefined,
+        model: $('ai-model')?.value || undefined,
+        api_key: $('ai-key')?.value || undefined,
+      }});
       if (resultEl) {
         const modeLabel = { auto: '✅ Responderia automaticamente', suggest: '📝 Geraria sugestão para revisão', skip: '⚠ Passaria para você' }[r.mode] || r.mode;
         resultEl.innerHTML = `
@@ -2299,6 +2844,7 @@
             <div><strong>${modeLabel}</strong></div>
             <div style="margin-top:6px"><span class="muted">Resposta gerada:</span> ${r.reply || '(nenhuma)'}</div>
             ${r.reason ? `<div class="muted small" style="margin-top:4px">Motivo: ${r.reason}</div>` : ''}
+            <div class="muted small" style="margin-top:4px">${r.provider || ''} ${r.model ? '· ' + r.model : ''} ${r.latency_ms ? '· ' + r.latency_ms + 'ms' : ''}</div>
           </div>`;
       }
     } catch (e) {

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=623">
+<link rel="stylesheet" href="style.css?v=627">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -47,8 +47,11 @@
       <button class="nav-btn" data-screen="conversas"><span class="nav-icon">💬</span><span>Conversas</span></button>
       <button class="nav-btn" data-screen="falhas"><span class="nav-icon">⚠</span><span>Falhas</span></button>
       <button class="nav-btn" data-screen="estatisticas"><span class="nav-icon">📊</span><span>Estatísticas</span></button>
+      <button class="nav-btn" data-screen="chaves"><span class="nav-icon">🔑</span><span>Chaves</span></button>
+      <button class="nav-btn" data-screen="clonar"><span class="nav-icon">📋</span><span>Clonar</span></button>
       <button class="nav-btn" data-screen="broadcast"><span class="nav-icon">📢</span><span>Broadcast</span></button>
       <button class="nav-btn" data-screen="teste"><span class="nav-icon">🧪</span><span>Modo Teste</span></button>
+      <button class="nav-btn" data-screen="logs"><span class="nav-icon">📜</span><span>Logs</span></button>
       <button class="nav-btn" data-screen="config"><span class="nav-icon">⚙</span><span>Configurações</span></button>
     </nav>
     <div class="sidebar-foot">
@@ -129,7 +132,7 @@
           <option value="paused">Anúncios pausados</option>
           <option value="low">Estoque baixo (≤5)</option>
         </select>
-        <button class="btn dark" id="btn-loadprods">↻ Carregar</button>
+        <button class="btn ghost" id="btn-prod-csv-export">↓ CSV</button><button class="btn ghost" id="btn-prod-csv-import">↑ Importar CSV</button><input type="file" id="prod-csv-file" accept=".csv,text/csv" style="display:none"><button class="btn dark" id="btn-loadprods">↻ Carregar</button>
         <span class="muted small" id="prod-count"></span>
       </div>
 
@@ -306,6 +309,12 @@
       </div>
 
       <div class="block">
+        <div class="block-head"><h2>Mapa de Calor — horários de venda</h2></div>
+        <p class="muted small">Quando seus compradores compram. Use para saber quando vale reforçar estoque, ativar anúncios ou estar disponível.</p>
+        <div id="heatmap" style="margin-top:12px;overflow-x:auto"></div>
+      </div>
+
+      <div class="block">
         <div class="block-head">
           <h2>Conversão por Anúncio</h2>
           <div style="display:flex;gap:8px;align-items:center">
@@ -328,6 +337,89 @@
           </table>
         </div>
       </div>
+    </section>
+
+    <section class="screen hidden" data-screen="chaves">
+      <div class="screen-head">
+        <h1>Chaves de Produto</h1>
+        <p class="muted">Estoque de chaves por anúncio, com entrega automática a cada venda</p>
+      </div>
+      <div class="toolbar">
+        <select id="keys-product" style="min-width:260px"></select>
+        <button class="btn dark" id="btn-keys-reload">↻ Atualizar</button>
+        <span class="muted small" id="keys-summary"></span>
+      </div>
+
+      <div class="block">
+        <div class="block-head"><h2>Como este anúncio entrega a chave</h2></div>
+        <div class="form-grid" style="margin-top:10px">
+          <label class="muted small">Modo
+            <select id="keys-mode" style="display:block;width:100%;margin-top:4px">
+              <option value="fixed">Chave fixa — sempre a mesma</option>
+              <option value="rotate">Rotativa — uma chave vale por período/uso e troca sozinha</option>
+              <option value="pool">Estoque — uma chave diferente por venda</option>
+            </select>
+          </label>
+          <label class="muted small" id="keys-fixed-row">Chave fixa
+            <input type="text" id="keys-fixed" placeholder="XXXXX-XXXXX-XXXXX" style="display:block;width:100%;margin-top:4px">
+          </label>
+          <label class="muted small hidden" id="keys-days-row">Trocar após (dias) — 0 = não usar
+            <input type="number" id="keys-days" min="0" value="0" style="display:block;width:100%;margin-top:4px">
+          </label>
+          <label class="muted small hidden" id="keys-uses-row">Trocar após (vendas) — 0 = não usar
+            <input type="number" id="keys-uses" min="0" value="0" style="display:block;width:100%;margin-top:4px">
+          </label>
+          <label class="muted small">Avisar quando restarem
+            <input type="number" id="keys-low" min="0" value="3" style="display:block;width:100%;margin-top:4px">
+          </label>
+        </div>
+        <button class="btn green" id="btn-keys-savemode" style="margin-top:12px">Salvar configuração</button>
+        <div class="muted small" id="keys-mode-hint" style="margin-top:8px"></div>
+      </div>
+
+      <div class="block" id="keys-stock-block">
+        <div class="block-head"><h2>Estoque de chaves</h2></div>
+        <label class="muted small">Colar chaves (uma por linha)
+          <textarea id="keys-input" rows="5" style="width:100%;margin-top:4px" placeholder="ABCDE-12345-FGHIJ&#10;KLMNO-67890-PQRST"></textarea>
+        </label>
+        <div class="toolbar" style="margin-top:8px">
+          <button class="btn green" id="btn-keys-add">+ Adicionar ao estoque</button>
+          <button class="btn ghost" id="btn-keys-clean">🧹 Limpar chaves usadas</button>
+        </div>
+        <div id="keys-stats" class="info-grid" style="margin-top:12px"></div>
+        <div id="keys-list" class="scroll-list" style="margin-top:10px"></div>
+      </div>
+    </section>
+
+    <section class="screen hidden" data-screen="clonar">
+      <div class="screen-head">
+        <h1>Clonar Anúncios</h1>
+        <p class="muted">Copie anúncios da conta ativa para outra conta salva</p>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>Clonar Anúncios entre Contas</h2></div>
+        <p class="muted small">Copia anúncios da conta ativa para outra conta salva. Os anúncios são criados <strong>pausados</strong> por padrão na conta destino, para você revisar antes de publicar.</p>
+        <div class="msg-vars" style="margin-top:10px;border-left:3px solid var(--warning)">
+          <div class="muted small">⚠ <strong>Atenção:</strong> o Mercado Livre pode penalizar anúncios duplicados ou vincular contas que vendem catálogo idêntico. Use com contas legítimas e revise/edite os anúncios clonados antes de ativar.</div>
+        </div>
+        <div style="margin-top:12px">
+          <label class="muted small">Conta destino
+            <select id="clone-target" style="display:block;width:100%;margin-top:4px"></select>
+          </label>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <input class="search" id="clone-search" placeholder="🔍 Buscar anúncio…">
+          <label class="bulk-checkall"><input type="checkbox" id="clone-selectall"><span>Todos</span></label>
+          <select id="clone-mode">
+            <option value="paused">Criar pausado (recomendado)</option>
+            <option value="active">Criar ativo</option>
+          </select>
+          <button class="btn dark" id="btn-clone-start">📋 Clonar selecionados</button>
+        </div>
+        <div id="clone-prod-list" class="msg-prod-list scroll-list" style="margin-top:8px"></div>
+        <div id="clone-progress" style="margin-top:14px"></div>
+      </div>
+
     </section>
 
     <section class="screen hidden" data-screen="broadcast">
@@ -414,6 +506,30 @@
       </div>
     </section>
 
+    <section class="screen hidden" data-screen="logs">
+      <div class="screen-head">
+        <h1>Logs</h1>
+        <p class="muted">Histórico completo de atividade do sistema, com busca e filtros</p>
+      </div>
+      <div class="toolbar">
+        <input class="search" id="log-search" placeholder="🔍 Buscar no log (comprador, pedido, texto…)">
+        <select id="log-filter">
+          <option value="">Todos os tipos</option>
+          <option value="✅">Mensagens enviadas</option>
+          <option value="📦">Novos pedidos</option>
+          <option value="✔">Vendas confirmadas</option>
+          <option value="🤖">IA</option>
+          <option value="🛟">Recuperações</option>
+          <option value="🚫|❌|⚠">Erros e bloqueios</option>
+        </select>
+        <label class="bulk-checkall"><input type="checkbox" id="log-autorefresh" checked><span>Auto-atualizar</span></label>
+        <button class="btn dark" id="btn-log-refresh">↻ Atualizar</button>
+        <button class="btn ghost" id="btn-log-export">↓ Exportar</button>
+        <span class="muted small" id="log-count"></span>
+      </div>
+      <div class="log scroll-list" id="log-full" style="max-height:600px"></div>
+    </section>
+
     <section class="screen hidden" data-screen="config">
       <div class="screen-head">
         <h1>Configurações</h1>
@@ -430,29 +546,41 @@
         <div id="accounts-list" style="margin-top:12px"></div>
       </div>
 
-      <!-- Clone listings between accounts -->
+      <!-- Telegram -->
       <div class="block">
-        <div class="block-head"><h2>Clonar Anúncios entre Contas</h2></div>
-        <p class="muted small">Copia anúncios da conta ativa para outra conta salva. Os anúncios são criados <strong>pausados</strong> por padrão na conta destino, para você revisar antes de publicar.</p>
-        <div class="msg-vars" style="margin-top:10px;border-left:3px solid var(--warning)">
-          <div class="muted small">⚠ <strong>Atenção:</strong> o Mercado Livre pode penalizar anúncios duplicados ou vincular contas que vendem catálogo idêntico. Use com contas legítimas e revise/edite os anúncios clonados antes de ativar.</div>
-        </div>
+        <div class="block-head"><h2>Alertas no Telegram</h2></div>
+        <p class="muted small">Receba avisos no celular quando algo acontecer, sem precisar abrir o painel. Gratuito.</p>
+        <ol class="muted small" style="margin:10px 0 0 18px;line-height:1.7">
+          <li>No Telegram, abra <strong>@BotFather</strong> e envie <code>/newbot</code>. Dê um nome e copie o token.</li>
+          <li>Cole o token abaixo.</li>
+          <li>Abra o seu bot no Telegram e envie <code>/start</code>.</li>
+          <li>Clique em <strong>Conectar</strong> — o sistema descobre o resto sozinho.</li>
+        </ol>
         <div style="margin-top:12px">
-          <label class="muted small">Conta destino
-            <select id="clone-target" style="display:block;width:100%;margin-top:4px"></select>
+          <label class="muted small">Token do bot
+            <input type="password" id="tg-token" placeholder="123456789:AA..." style="display:block;width:100%;margin-top:4px">
           </label>
+          <div class="muted small" id="tg-status" style="margin-top:6px"></div>
         </div>
-        <div class="toolbar" style="margin-top:12px">
-          <input class="search" id="clone-search" placeholder="🔍 Buscar anúncio…">
-          <label class="bulk-checkall"><input type="checkbox" id="clone-selectall"><span>Todos</span></label>
-          <select id="clone-mode">
-            <option value="paused">Criar pausado (recomendado)</option>
-            <option value="active">Criar ativo</option>
-          </select>
-          <button class="btn dark" id="btn-clone-start">📋 Clonar selecionados</button>
+        <div class="toolbar" style="margin-top:10px">
+          <button class="btn green" id="btn-tg-connect">Conectar</button>
+          <button class="btn dark" id="btn-tg-test">🔔 Enviar teste</button>
+          <button class="btn ghost" id="btn-tg-off">Desconectar</button>
         </div>
-        <div id="clone-prod-list" class="msg-prod-list scroll-list" style="margin-top:8px"></div>
-        <div id="clone-progress" style="margin-top:14px"></div>
+        <div id="tg-alerts" style="margin-top:14px"></div>
+        <button class="btn green" id="btn-tg-save" style="margin-top:10px">Salvar alertas</button>
+        <div class="muted small" id="tg-backup-info" style="margin-top:10px"></div>
+      </div>
+
+      <!-- Quick replies -->
+      <div class="block">
+        <div class="block-head">
+          <h2>Respostas Rápidas</h2>
+          <button class="btn green sm" id="btn-qr-add">+ Adicionar</button>
+        </div>
+        <p class="muted small">Botões de resposta pronta que aparecem no chat das Conversas. Um clique preenche a mensagem — sem IA e sem custo.</p>
+        <div id="qr-list" style="margin-top:10px"></div>
+        <button class="btn green" id="btn-qr-save" style="margin-top:10px">Salvar respostas rápidas</button>
       </div>
 
       <!-- AI assistant config -->
@@ -474,8 +602,40 @@
         </div>
 
         <div style="margin-top:14px">
-          <label class="muted small">Chave de API da OpenAI
-            <input type="password" id="ai-key" placeholder="sk-..." style="display:block;width:100%;margin-top:4px">
+          <label class="muted small">Provedor de IA
+            <select id="ai-provider" style="display:block;width:100%;margin-top:4px">
+              <option value="workers_ai">Cloudflare Workers AI — roda na Cloudflare, sem chave externa</option>
+              <option value="openai_compat">Compatível com OpenAI — IA local (Ollama/LM Studio), DeepSeek, Qwen, Kimi, GLM, Groq</option>
+              <option value="openai">OpenAI (oficial)</option>
+              <option value="anthropic">Anthropic / Claude</option>
+              <option value="local_agent">IA local via agente (roda no seu PC, sem túnel)</option>
+            </select>
+          </label>
+          <div class="muted small" id="ai-provider-hint" style="margin-top:6px"></div>
+        </div>
+
+        <div id="ai-preset-row" style="margin-top:10px" class="hidden">
+          <label class="muted small">Preset rápido
+            <select id="ai-preset" style="display:block;width:100%;margin-top:4px"></select>
+          </label>
+        </div>
+
+        <div id="ai-baseurl-row" style="margin-top:10px" class="hidden">
+          <label class="muted small">URL base do provedor
+            <input type="text" id="ai-baseurl" placeholder="https://seu-tunel.trycloudflare.com/v1" style="display:block;width:100%;margin-top:4px">
+          </label>
+          <div class="muted small" style="margin-top:4px">Para IA local, use o endereço público do túnel — o Worker roda na nuvem e não enxerga <code>localhost</code>.</div>
+        </div>
+
+        <div style="margin-top:10px">
+          <label class="muted small">Modelo
+            <input type="text" id="ai-model" placeholder="@cf/meta/llama-3.1-8b-instruct" style="display:block;width:100%;margin-top:4px">
+          </label>
+        </div>
+
+        <div id="ai-key-row" style="margin-top:10px">
+          <label class="muted small">Chave de API
+            <input type="password" id="ai-key" placeholder="deixe em branco para manter a atual" style="display:block;width:100%;margin-top:4px">
           </label>
           <div class="muted small" id="ai-key-status" style="margin-top:4px"></div>
         </div>
@@ -499,6 +659,13 @@
           <button class="btn dark" id="btn-ai-test">🧪 Testar IA</button>
         </div>
         <div id="ai-test-result" style="margin-top:10px"></div>
+        <div id="ai-agent-box" class="hidden" style="margin-top:14px">
+          <div class="msg-vars">
+            <div><strong>Agente local</strong> <span id="ai-agent-status" class="muted small"></span></div>
+            <div class="muted small" style="margin-top:6px">O agente roda no seu computador e busca as perguntas aqui. Não precisa de túnel, porta aberta nem IP fixo — se o PC estiver desligado, as perguntas viram sugestões no Inbox.</div>
+            <div class="muted small" style="margin-top:6px">Baixe o arquivo <code>ml-sender-agent.js</code>, preencha a chave secreta, instale o <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> e rode <code>node ml-sender-agent.js</code>.</div>
+          </div>
+        </div>
       </div>
 
       <!-- Health -->
@@ -617,6 +784,6 @@
   </div>
 </div>
 
-<script src="app.js?v=623"></script>
+<script src="app.js?v=627"></script>
 </body>
 </html>
