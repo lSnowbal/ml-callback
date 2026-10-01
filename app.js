@@ -5,7 +5,7 @@
   'use strict';
 
   const DEFAULT_WORKER = 'https://crimson-heart-bac6.michaelvmardegam.workers.dev';
-  const PANEL_VERSION = '6.28';
+  const PANEL_VERSION = '6.29';
 
   // ─── State ───────────────────────────────────────────────────────
   const state = {
@@ -46,6 +46,13 @@
   // Escape anything that goes into innerHTML (titles, names and errors come
   // from Mercado Livre, buyers or the URL — never trust them as HTML)
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // CSV cell. Text that a spreadsheet would run as a formula (=, +, -, @ —
+  // buyer names and titles come from outside) gets a leading apostrophe.
+  const csvCell = v => {
+    let t = String(v ?? '');
+    if (/^[=+\-@\t\r]/.test(t) && !/^-?\d+([.,]\d+)?$/.test(t)) t = "'" + t;
+    return `"${t.replace(/"/g, '""')}"`;
+  };
 
   const VARS_HELP = `<div class="msg-vars muted small">Variáveis: <code>{nome}</code> apelido do comprador · <code>{primeiro_nome}</code> primeiro nome · <code>{key}</code> chave do produto · <code>{pedido}</code> número do pedido · <code>{produto}</code> título do anúncio<br>Até 350 caracteres por mensagem (limite do Mercado Livre) — se passar, o sistema divide em duas automaticamente.</div>`;
   // Live character counter under each message box
@@ -107,21 +114,23 @@
   };
 
   // ─── Login flow ─────────────────────────────────────────────────
-  const stored = JSON.parse(localStorage.getItem('mlas_auth') || 'null');
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem('mlas_auth') || 'null'); } catch { /* dado corrompido: pede login */ }
+  // the field must hold the saved Worker BEFORE the automatic login reads it
+  // (before v6.29 a saved Worker other than the default was ignored on reload)
+  const _lw = $('login-worker');
+  if (_lw) _lw.value = (stored?.worker) || DEFAULT_WORKER;
   if (stored) {
     state.worker = stored.worker || DEFAULT_WORKER;
     state.secret = stored.secret || '';
     if (state.secret) tryLogin(true);
   }
 
-  const _lw = $('login-worker');
-  if (_lw) _lw.value = (stored?.worker) || DEFAULT_WORKER;
-
   bind('login-btn', 'click', () => tryLogin(false));
   bind('login-secret', 'keydown', e => { if (e.key === 'Enter') tryLogin(false); });
 
   async function tryLogin(silent) {
-    const worker = $('login-worker').value.trim() || DEFAULT_WORKER;
+    const worker = $('login-worker').value.trim() || state.worker || DEFAULT_WORKER;
     const secret = $('login-secret').value.trim() || state.secret;
     if (!secret) { $('login-err').textContent = 'Informe a chave secreta'; return; }
     state.worker = worker; state.secret = secret;
@@ -157,6 +166,7 @@
     safe('wireSettingsHandlers', wireSettingsHandlers);
     safe('wireBroadcastHandlers', wireBroadcastHandlers);
     safe('wireCreateHandlers', wireCreateHandlers);
+    safe('wireAnalyticsHandlers', wireAnalyticsHandlers);
     safe('refresh', refresh);
     safe('startPolling', startPolling);
     safe('accent', () => {
@@ -204,7 +214,7 @@
       if (name === 'mensagens') { loadTemplates(); loadMessagesScreen(); }
       if (name === 'broadcast') initBroadcast();
       if (name === 'config') initSettings();
-      if (name === 'estatisticas') renderStats();
+      if (name === 'estatisticas') initStats();
       if (name === 'fila') loadQueue();
       if (name === 'conversas') loadInbox();
       if (name === 'clonar') initCloneSection();
@@ -328,7 +338,6 @@
         state.lastEventTs = s.server_time || Date.now();
         localStorage.setItem('mlas_last_event_ts', String(state.lastEventTs));
       } else if (Array.isArray(s.events) && s.events.length) handleEvents(s.events);
-      if (state.currentScreen === 'estatisticas') renderStats();
     } catch (e) {
       $('status-text').textContent = e.status === 401 ? 'Chave inválida' : 'Offline';
       $('status-dot').className = 'status-dot red';
@@ -1022,7 +1031,7 @@
   function exportOrdersCSV() {
     const rows = [['order_id','item_id','buyer','msgs_sent','confirmed','created_at']];
     state.orders.forEach(o => rows.push([o.order_id, o.item_id, o.buyer, o.msgs_sent, o.confirmed, o.created_at]));
-    const csv = rows.map(r => r.map(c => `"${(c||'').toString().replace(/"/g,'""')}"`).join(',')).join('\n');
+    const csv = rows.map(r => r.map(csvCell).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = el('a', { href: url, download: `pedidos_${new Date().toISOString().slice(0,10)}.csv` });
@@ -1102,75 +1111,27 @@
     } catch (e) { toast(e.message, 'err'); }
   }
 
-  // ─── Mapa de calor: dia da semana × hora ───
-  function renderHeatmap() {
-    const cont = $('heatmap');
-    if (!cont) return;
-    const orders = state.orders || [];
-    if (!orders.length) {
-      cont.innerHTML = '<div class="muted small">Sem vendas registradas ainda.</div>';
-      return;
-    }
-    const dias = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-    const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
-    let max = 0;
-    orders.forEach(o => {
-      const d = new Date(o.created_at);
-      if (isNaN(d)) return;
-      const v = ++grid[d.getDay()][d.getHours()];
-      if (v > max) max = v;
-    });
-    if (!max) { cont.innerHTML = '<div class="muted small">Sem datas válidas no histórico.</div>'; return; }
-    let html = '<table class="heatmap-table"><thead><tr><th></th>';
-    for (let h = 0; h < 24; h++) html += `<th>${String(h).padStart(2, '0')}</th>`;
-    html += '</tr></thead><tbody>';
-    grid.forEach((row, di) => {
-      html += `<tr><th>${dias[di]}</th>`;
-      row.forEach((v, h) => {
-        const pct = v / max;
-        const bg = v === 0 ? 'transparent' : `color-mix(in srgb, var(--accent) ${Math.round(15 + pct * 85)}%, transparent)`;
-        html += `<td title="${dias[di]} ${String(h).padStart(2,'0')}h — ${v} venda(s)" style="background:${bg}">${v || ''}</td>`;
-      });
-      html += '</tr>';
-    });
-    html += '</tbody></table>';
-    const best = [];
-    grid.forEach((row, di) => row.forEach((v, h) => best.push({ di, h, v })));
-    best.sort((x, y) => y.v - x.v);
-    const top = best.slice(0, 3).filter(b => b.v > 0)
-      .map(b => `${dias[b.di]} ${String(b.h).padStart(2, '0')}h (${b.v})`).join(' · ');
-    if (top) html += `<div class="muted small" style="margin-top:8px">Picos: ${top}</div>`;
-    cont.innerHTML = html;
-  }
-
+  // Desempenho do envio automático — últimas vendas registradas pelo Worker
+  // (a análise de vendas completa fica no módulo ANÁLISE DE VENDAS, no fim)
   async function renderStats() {
-    if (state.currentScreen !== 'estatisticas') return;
     try {
-      const daily = await api('/api/stats/daily');
-      const orders = state.orders.length ? state.orders : await api('/api/orders');
+      const orders = await api('/api/orders');
       state.orders = orders;
-      renderHeatmap();
-
-      const totalOrders = orders.length;
-      const totalMsgs = orders.reduce((s,o) => s + (o.msgs_sent || 0), 0);
-      const totalConfirmed = orders.filter(o => o.confirmed).length;
-
-      const expectedMsgs = totalOrders * 4;
-      $('kpi-success').textContent = expectedMsgs ? Math.round(totalMsgs / expectedMsgs * 100) + '%' : '—';
-      $('kpi-conv').textContent = totalOrders ? Math.round(totalConfirmed / totalOrders * 100) + '%' : '—';
-      // Tempo real entre a venda entrar na fila e a 1ª mensagem sair.
-      const timed = (state.orders || []).filter(o => Number(o.first_msg_ms) > 0);
+      const done = orders.filter(o => Number(o.total_msgs) > 0 && !o.in_queue);
+      const planned = done.reduce((t, o) => t + Number(o.total_msgs), 0);
+      const sent = done.reduce((t, o) => t + Math.min(Number(o.msgs_sent || 0), Number(o.total_msgs)), 0);
+      $('kpi-success').textContent = planned ? Math.round(sent / planned * 100) + '%' : '—';
+      const confirmed = orders.filter(o => o.confirmed).length;
+      $('kpi-conv').textContent = orders.length ? Math.round(confirmed / orders.length * 100) + '%' : '—';
+      // tempo real entre a venda entrar na fila e a 1ª mensagem sair
+      const timed = orders.filter(o => Number(o.first_msg_ms) > 0);
       if (timed.length) {
-        const avgMs = timed.reduce((a2, o) => a2 + Number(o.first_msg_ms), 0) / timed.length;
-        $('kpi-avg').textContent = avgMs < 60000
-          ? `${Math.round(avgMs / 1000)}s`
-          : `${(avgMs / 60000).toFixed(1)}min`;
-      } else {
-        $('kpi-avg').textContent = '—';
-      }
-
-      drawChart(daily);
-    } catch (e) { /* silent */ }
+        const avgMs = timed.reduce((t, o) => t + Number(o.first_msg_ms), 0) / timed.length;
+        $('kpi-avg').textContent = avgMs < 60000 ? `${Math.round(avgMs / 1000)}s` : `${(avgMs / 60000).toFixed(1)}min`;
+      } else $('kpi-avg').textContent = '—';
+      const note = $('kpi-sample');
+      if (note) note.textContent = orders.length ? `Baseado nas últimas ${orders.length} vendas registradas pelo envio automático.` : 'Ainda não há vendas registradas pelo envio automático.';
+    } catch (e) { /* silencioso: a análise de vendas acima continua funcionando */ }
   }
 
   // "Sobre o Sistema" (Configurações)
@@ -1182,62 +1143,6 @@
     } catch { if ($('info-version')) $('info-version').textContent = '—'; }
     if ($('info-panel')) $('info-panel').textContent = 'v' + PANEL_VERSION;
   }
-
-  function drawChart(data) {
-    const canvas = $('chart-daily');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-    const W = canvas.clientWidth; const H = canvas.clientHeight;
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, W, H);
-    if (!data.length) {
-      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--muted');
-      ctx.font = '13px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Sem dados ainda', W/2, H/2);
-      return;
-    }
-    const last14 = data.slice(-14);
-    const max = Math.max(...last14.map(d => d.orders), 1);
-    const padX = 40, padY = 30;
-    const cw = W - padX * 2, ch = H - padY * 2;
-    const bw = cw / last14.length;
-    const cs = getComputedStyle(document.documentElement);
-    const accent = cs.getPropertyValue('--accent') || '#30d158';
-    const muted = cs.getPropertyValue('--muted') || '#8e8e93';
-
-    // grid
-    ctx.strokeStyle = cs.getPropertyValue('--border') || '#2c2c2e';
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i++) {
-      const y = padY + (ch / 4) * i;
-      ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
-      ctx.fillStyle = muted; ctx.font = '10px sans-serif';
-      ctx.textAlign = 'right'; ctx.fillText(Math.round(max - max * i / 4), padX - 6, y + 3);
-    }
-
-    // bars
-    last14.forEach((d, i) => {
-      const x = padX + bw * i + 4;
-      const h = (d.orders / max) * ch;
-      const y = padY + ch - h;
-      const grad = ctx.createLinearGradient(0, y, 0, y + h);
-      grad.addColorStop(0, accent);
-      grad.addColorStop(1, accent + '40');
-      ctx.fillStyle = grad;
-      ctx.fillRect(x, y, bw - 8, h);
-      ctx.fillStyle = muted; ctx.font = '9px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(d.date.slice(5), x + (bw - 8) / 2, H - padY + 14);
-    });
-  }
-
-  // Resize chart on window change
-  window.addEventListener('resize', () => {
-    if (state.currentScreen === 'estatisticas') renderStats();
-  });
 
   // ─── OAuth callback handling ────────────────────────────────────
   // Page loaded with ?code= but no pending in-app authorization (e.g. the
@@ -2879,8 +2784,20 @@
   // Fluxo simples: ponto de partida (copiar um anúncio seu ou do zero) →
   // categoria → dados, fotos, ficha técnica, descrição → validar → publicar.
   // O rascunho fica salvo neste navegador enquanto você preenche.
-  state.cr = { mode: 'copy', cat: null, draft: null, pictures: [], templateTerms: [], seller: null, fees: [], uploading: 0 };
+  state.cr = { mode: 'copy', cat: null, draft: null, pictures: [], templateTerms: [], seller: null, fees: [], uploading: 0,
+    vars: [], batchSel: new Map(), batchRes: {}, feeCache: new Map(), feeSeq: 0, netBy: {}, pendingSender: null,
+    busy: '', gen: 0, keyCfg: null };
   const CR_DRAFT_KEY = 'mlas_create_draft';
+  const CR_MAX_BATCH = 10, CR_MAX_VARS = 5, CR_GAP_MS = 1500;
+  // os dois formatos de anúncio: cada um com o seu preço
+  const CR_FMT = [
+    { lt: 'gold_special', name: 'Clássico', check: 'cr-fmt-classic', price: 'cr-price', fee: 'cr-fee-classic', row: 'cr-fmt-row-classic' },
+    { lt: 'gold_pro', name: 'Premium', check: 'cr-fmt-premium', price: 'cr-price-premium', fee: 'cr-fee-premium', row: 'cr-fmt-row-premium' },
+  ];
+  const crNum = v => Number(String(v ?? '').replace(',', '.')) || 0;
+  const crBrl = n => `R$ ${Number(n || 0).toFixed(2).replace('.', ',')}`;
+  const crFold = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const crSafeUrl = u => (/^https:\/\//i.test(String(u || '')) ? String(u) : '');
   const COND_LABEL = { new: 'Novo', used: 'Usado', not_specified: 'Não especificado' };
   const SHIP_LABEL = { not_specified: 'Sem envio pelo ML (produto digital / combinar)', me2: 'Mercado Envios', me1: 'Mercado Envios 1', custom: 'Frete personalizado' };
 
@@ -2906,8 +2823,12 @@
         box.innerHTML = '';
         box.classList.toggle('hidden', !(saved && saved.draft && saved.draft.category_id));
         if (saved && saved.draft && saved.draft.category_id) {
+          const made = Object.values(saved.batch_done || {}).filter(r => r && r.status === 'ok').length;
+          const when = new Date(saved.saved_at || Date.now()).toLocaleString('pt-BR');
           box.append(
-            el('span', {}, `📝 Rascunho não publicado: "${String(saved.draft.title || 'sem título').slice(0, 50)}" (${new Date(saved.saved_at || Date.now()).toLocaleString('pt-BR')})`),
+            el('span', {}, made
+              ? `📝 Rascunho em andamento: "${String(saved.draft.title || 'sem título').slice(0, 50)}" — ${made} anúncio(s) já publicado(s) a partir dele (${when})`
+              : `📝 Rascunho não publicado: "${String(saved.draft.title || 'sem título').slice(0, 50)}" (${when})`),
             el('button', { class: 'btn green sm', onclick: () => crRestore(saved) }, 'Continuar'),
             el('button', { class: 'btn ghost sm', onclick: () => { localStorage.removeItem(CR_DRAFT_KEY); box.classList.add('hidden'); } }, 'Descartar'));
         }
@@ -2918,10 +2839,18 @@
   function wireCreateHandlers() {
     $$('[data-cr-start]').forEach(b => b.addEventListener('click', () => crSetMode(b.dataset.crStart)));
     bind('cr-copy-search', 'input', crRenderCopyList);
+    bind('btn-cr-copy-url', 'click', crCopyFromLink);
+    bind('cr-copy-url', 'keydown', e => { if (e.key === 'Enter') crCopyFromLink(); });
+    bind('btn-cr-add-var', 'click', () => crAddVar(''));
+    bind('btn-cr-match-net', 'click', crMatchNet);
+    for (const f of CR_FMT) {
+      bind(f.check, 'change', () => { crFormatUI(); crFees(); });
+      // digitar um preço já marca o formato
+      bind(f.price, 'input', () => { const c = $(f.check); if (c && !c.checked && crNum($(f.price).value) > 0) { c.checked = true; crFormatUI(); } clearTimeout(state.cr.feeT); state.cr.feeT = setTimeout(crFees, 600); });
+    }
     bind('btn-cr-predict', 'click', crPredict);
     bind('cr-predict-q', 'keydown', e => { if (e.key === 'Enter') crPredict(); });
     bind('cr-title', 'input', crTitleCount);
-    bind('cr-price', 'input', () => { clearTimeout(state.cr.feeT); state.cr.feeT = setTimeout(crFees, 600); });
     bind('btn-cr-addphoto', 'click', () => $('cr-photo-file')?.click());
     bind('cr-photo-file', 'change', e => { const f = Array.from(e.target.files || []); e.target.value = ''; crAddPhotos(f); });
     bind('btn-cr-photo-url', 'click', crAddPhotoUrl);
@@ -2935,7 +2864,18 @@
     bind('cr-sender-tpl', 'change', crApplyTpl);
     bind('cr-warranty-type', 'change', crWarrantyUI);
     const root = $('cr-root');
-    if (root) { root.addEventListener('input', crAutosave); root.addEventListener('change', crAutosave); }
+    if (root) { root.addEventListener('input', crOnEdit); root.addEventListener('change', crOnEdit); }
+  }
+
+  // Any edit: the last "validado" no longer applies, the list of listings to
+  // create is redrawn (titles × formats) and the draft is saved.
+  function crOnEdit(e) {
+    if (e && e.target && e.target.closest && e.target.closest('#cr-batch')) { crAutosave(); return; }
+    let changed = false;
+    for (const k of Object.keys(state.cr.batchRes)) if (['valid', 'invalid'].includes(state.cr.batchRes[k].status)) { delete state.cr.batchRes[k]; changed = true; }
+    clearTimeout(state.cr.batchT);
+    state.cr.batchT = setTimeout(crRenderBatch, changed ? 0 : 150);
+    crAutosave();
   }
 
   function crSetMode(mode) {
@@ -2986,25 +2926,39 @@
     } catch (e) { box.innerHTML = ''; box.appendChild(el('div', { class: 'small', style: 'color:var(--danger)' }, e.message)); }
   }
 
-  async function crSelectCategory(catId, prefill = [], draft = null) {
+  // Resolves true only when the form was actually filled with this category
+  // (and `onReady` ran). A category that can't take listings, or a lookup
+  // error, leaves the current form untouched — the caller must not go on as if
+  // the new starting point had been loaded.
+  async function crSelectCategory(catId, prefill = [], draft = null, onReady = null) {
     const info = $('cr-cat-info');
+    const before = [...info.childNodes];
     info.textContent = 'Carregando categoria…';
     let cat;
     try { cat = await api(`/api/create/category?id=${encodeURIComponent(catId)}`); }
-    catch (e) { info.textContent = ''; toast(e.message, 'err'); return; }
+    catch (e) { info.replaceChildren(...before); toast(e.message, 'err', 7000); return false; }
     if (!cat.leaf || cat.listing_allowed === false) {
-      // not a final category: let the user go one level down
       info.innerHTML = '';
+      const kids = cat.children || [];
+      if (!kids.length) {
+        info.append(...before);
+        toast(`A categoria "${cat.name || catId}" não aceita anúncios novos no Mercado Livre. Escolha outra (Começar do zero → Sugerir categoria).`, 'err', 9000);
+        return false;
+      }
+      // not a final category: let the user go one level down
       info.appendChild(el('div', { class: 'small', style: 'color:var(--warning);margin-bottom:6px' }, `"${cat.name}" é uma categoria geral. Escolha uma mais específica:`));
       const wrap = el('div', { class: 'cr-children' });
-      (cat.children || []).forEach(ch => wrap.appendChild(el('button', { class: 'btn ghost sm', onclick: () => crSelectCategory(ch.id, prefill, draft) }, ch.name)));
+      kids.forEach(ch => wrap.appendChild(el('button', { class: 'btn ghost sm', onclick: () => crSelectCategory(ch.id, prefill, draft, onReady) }, ch.name)));
       info.appendChild(wrap);
-      return;
+      return false;
     }
     state.cr.cat = cat;
     info.innerHTML = '';
     info.append(el('span', {}, '📂 '), el('strong', {}, cat.path || cat.name), el('span', { class: 'muted small' }, ` (${cat.id})`),
-      el('button', { class: 'btn ghost sm', style: 'margin-left:8px', onclick: () => { state.cr.cat = null; crShowForm(false); info.textContent = ''; } }, 'trocar'));
+      el('button', { class: 'btn ghost sm', style: 'margin-left:8px', onclick: () => {
+        if (state.cr.busy) { toast('Espere a validação/publicação em andamento terminar', 'warn'); return; }
+        state.cr.cat = null; crShowForm(false); info.textContent = '';
+      } }, 'trocar'));
     crShowForm(true);
     const s = cat.settings || {};
     const t = $('cr-title'); t.maxLength = s.max_title_length || 60; crTitleCount();
@@ -3020,9 +2974,12 @@
     crRenderAttrs(cat, cur);
     if (draft) crFillForm(draft);
     $('cr-photo-max').textContent = `até ${Math.min(10, s.max_pictures_per_item || 10)} fotos`;
+    if (onReady) onReady();
+    crRenderVars(); crFormatUI();
     crFees();
     crAutosave();
     $('cr-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
   }
 
   function crShowForm(on) {
@@ -3117,9 +3074,11 @@
   function crFillForm(d) {
     $('cr-title').value = d.title || '';
     crTitleCount();
-    $('cr-price').value = d.price ?? '';
+    const isPro = d.listing_type_id === 'gold_pro';
+    $('cr-fmt-classic').checked = !isPro; $('cr-fmt-premium').checked = isPro;
+    $('cr-price').value = isPro ? '' : (d.price ?? '');
+    $('cr-price-premium').value = isPro ? (d.price ?? '') : '';
     $('cr-qty').value = d.available_quantity ?? 1;
-    if (d.listing_type_id) $('cr-type').value = d.listing_type_id === 'gold_pro' ? 'gold_pro' : 'gold_special';
     if (d.condition && [...$('cr-condition').options].some(o => o.value === d.condition)) $('cr-condition').value = d.condition;
     if (d.shipping?.mode && [...$('cr-shipping').options].some(o => o.value === d.shipping.mode)) $('cr-shipping').value = d.shipping.mode;
     $('cr-desc').value = d.description || '';
@@ -3128,11 +3087,9 @@
     const terms = d.sale_terms || [];
     const wt = terms.find(s => s.id === 'WARRANTY_TYPE'), wtime = terms.find(s => s.id === 'WARRANTY_TIME');
     const sel = $('cr-warranty-type');
-    if (wt) {
-      const name = wt.value_name || '';
-      if (![...sel.options].some(o => o.value === name) && name) sel.appendChild(el('option', { value: name }, name));
-      sel.value = name;
-    }
+    const name = wt ? (wt.value_name || '') : '';
+    if (name && ![...sel.options].some(o => o.value === name)) sel.appendChild(el('option', { value: name }, name));
+    sel.value = name; // sem garantia no modelo: não herda a do anúncio anterior
     $('cr-warranty-time').value = wtime?.value_name || '';
     state.cr.templateTerms = terms.filter(s => s.id !== 'WARRANTY_TYPE' && s.id !== 'WARRANTY_TIME');
     crWarrantyUI();
@@ -3146,12 +3103,13 @@
       const time = ($('cr-warranty-time')?.value || '').trim();
       if (wt !== 'Sem garantia' && time) terms.push({ id: 'WARRANTY_TIME', value_name: time });
     }
+    const fm = crFormatsAll(), first = fm.find(f => f.on) || fm[0];
     return {
       category_id: state.cr.cat?.id || '',
       title: ($('cr-title')?.value || '').trim(),
-      price: Number(String($('cr-price')?.value || '').replace(',', '.')) || 0,
+      price: first.priceVal,
       available_quantity: parseInt($('cr-qty')?.value) || 1,
-      listing_type_id: $('cr-type')?.value || 'gold_special',
+      listing_type_id: first.lt,
       condition: $('cr-condition')?.value || 'new',
       currency_id: 'BRL', buying_mode: 'buy_it_now',
       shipping: { mode: $('cr-shipping')?.value || 'not_specified', local_pick_up: false, free_shipping: false },
@@ -3163,12 +3121,15 @@
   }
 
   function crCollectSender() {
+    const k = state.cr.keyCfg;
     return {
       enabled: !!$('cr-sender-on')?.checked,
       messages: [0, 1, 2, 3].map(i => document.querySelector(`#cr-sender-fields textarea[data-cr-msg="${i}"]`)?.value || ''),
       delay_min: parseInt($('cr-delay-min')?.value) || 30,
       delay_max: parseInt($('cr-delay-max')?.value) || 90,
-      product_key: ($('cr-key')?.value || '').trim(),
+      product_key: k ? '' : ($('cr-key')?.value || '').trim(),
+      // stock of keys (pool / rotating) is carried over from the copied listing
+      ...(k ? { key_mode: k.key_mode, key_max_uses: k.key_max_uses, key_max_days: k.key_max_days, key_low_threshold: k.key_low_threshold } : { key_mode: 'fixed' }),
     };
   }
 
@@ -3178,9 +3139,24 @@
     [0, 1, 2, 3].forEach(i => { const ta = document.querySelector(`#cr-sender-fields textarea[data-cr-msg="${i}"]`); if (ta) ta.value = (s.messages || [])[i] || ''; });
     if (s.delay_min != null) $('cr-delay-min').value = s.delay_min;
     if (s.delay_max != null) $('cr-delay-max').value = s.delay_max;
-    $('cr-key').value = s.product_key || '';
+    const pooled = ['pool', 'rotate'].includes(s.key_mode);
+    state.cr.keyCfg = pooled ? { key_mode: s.key_mode, key_max_uses: Number(s.key_max_uses) || 0, key_max_days: Number(s.key_max_days) || 0, key_low_threshold: s.key_low_threshold ?? 3 } : null;
+    $('cr-key').value = pooled ? '' : (s.product_key || '');
+    $('cr-key').disabled = pooled;
     const note = $('cr-key-note');
-    if (note) note.textContent = s.key_mode && s.key_mode !== 'fixed' ? 'O anúncio de origem usa estoque de chaves: depois de publicar, cadastre as chaves do novo anúncio em "Chaves".' : '';
+    if (note) note.textContent = pooled ? `O anúncio de origem usa estoque de chaves (${s.key_mode === 'pool' ? 'uma chave por venda' : 'chave rotativa'}). Os anúncios novos usam o mesmo modo, começando SEM chaves: cadastre as chaves deles em "Chaves" antes de vender. Sem chave, a venda não é atendida automaticamente e você é avisado.` : '';
+    crSenderToggle();
+  }
+
+  // another seller's listing (or a fresh start): nothing of the previous
+  // listing's Auto Sender may carry over — its key belongs to another product
+  function crClearSender() {
+    state.cr.keyCfg = null;
+    if ($('cr-sender-on')) $('cr-sender-on').checked = false;
+    document.querySelectorAll('#cr-sender-fields textarea').forEach(t => { t.value = ''; });
+    if ($('cr-key')) { $('cr-key').value = ''; $('cr-key').disabled = false; }
+    if ($('cr-sender-tpl')) $('cr-sender-tpl').value = '';
+    if ($('cr-key-note')) $('cr-key-note').textContent = '';
     crSenderToggle();
   }
 
@@ -3205,52 +3181,396 @@
   }
 
   async function crLoadTemplate(itemId) {
+    if (state.cr.busy) { toast('Espere a validação/publicação em andamento terminar', 'warn'); return false; }
     toast('Carregando anúncio…', 'ok', 1500);
-    try {
-      const d = await api(`/api/create/template?item_id=${encodeURIComponent(itemId)}`);
-      d.title = d.title ? `${d.title}`.slice(0, 60) : '';
-      await crSelectCategory(d.category_id, [], d);
-      crFillSender(d.autosender);
-      crResult(el('div', { class: 'muted small' }, `Copiado de ${d.source_id}. Mude o que precisar (título, preço, fotos) antes de publicar — anúncios idênticos concorrem entre si.`));
-    } catch (e) { toast(e.message, 'err'); }
+    let d;
+    try { d = await api(`/api/create/template?item_id=${encodeURIComponent(itemId)}`); }
+    catch (e) { toast(e.message, 'err', 7000); return false; }
+    d.title = d.title ? `${d.title}`.slice(0, 60) : '';
+    // Everything below only happens once the form really holds this listing
+    // (crSelectCategory may stop: category closed, lookup error, subcategory to pick).
+    return crSelectCategory(d.category_id, [], d, () => {
+      // new starting point: the previous list of listings no longer applies
+      state.cr.gen++;
+      state.cr.vars = []; state.cr.batchSel = new Map(); state.cr.batchRes = {}; state.cr.pendingSender = null;
+      if ($('cr-title-options')) $('cr-title-options').innerHTML = '';
+      crResult(null);
+      const note = el('div', { class: 'msg-vars cr-src' });
+      if (d.foreign) {
+        crClearSender();
+        note.classList.add('foreign');
+        note.append(el('strong', {}, `Anúncio de outro vendedor (${d.source_id})`), el('br'),
+          el('span', {}, 'Copiamos só os dados do produto: categoria, ficha técnica e título. Fotos, descrição e garantia são dele e não foram copiadas — usar fotos e textos de outro vendedor vai contra as regras do Mercado Livre. Adicione as suas.'));
+        if (Number(d.source_price) > 0) note.append(el('br'), el('span', { class: 'muted small' }, `Preço dele: ${crBrl(d.source_price)} (preenchido igual — ajuste o seu).`));
+        note.append(el('br'), el('span', { class: 'muted small' }, 'Envio automático: desligado — configure as mensagens e a chave deste produto no passo 6. Dica: "✨ Sugerir nomes com IA" cria títulos seus a partir deste.'));
+      } else {
+        crFillSender(d.autosender);
+        note.append(el('span', {}, `Copiado de ${d.source_id}. Mude o que precisar (título, preço, fotos) antes de publicar — anúncios idênticos concorrem entre si.`));
+      }
+      crSrcNote(note);
+    });
+  }
+
+  function crSrcNote(node) {
+    const box = $('cr-src-note');
+    if (!box) return;
+    box.innerHTML = '';
+    box.classList.toggle('hidden', !node);
+    if (node) box.appendChild(node);
+  }
+
+  // "MLB-123…", "MLB123…", a listing link, or a catalog link that names the
+  // seller's offer (item_id / wid). Catalog (/p/) and product (MLBU) pages
+  // group many listings, so they can't be copied directly.
+  function crParseItemId(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return { error: 'Cole o link ou o código do anúncio (ex.: MLB-1234567890).' };
+    let txt = s; try { txt = decodeURIComponent(s); } catch { /* fica como veio */ }
+    const up = txt.toUpperCase();
+    let m = up.match(/(?:ITEM_ID[:=]|[?&#]WID=)\s*(ML[A-Z])-?(\d{5,})/);
+    if (!m && !/\/P\/ML[A-Z]\d+/.test(up)) m = up.match(/(?:^|[^A-Z0-9])(ML[A-Z])-?(\d{5,})(?!\d)/);
+    if (!m) {
+      if (/\/P\/ML[A-Z]\d+/.test(up)) return { error: 'Esse é um link de página de catálogo (/p/…), que junta vários vendedores. Abra a oferta de um vendedor (o link com MLB-…) e cole aqui.' };
+      if (/ML[A-Z]U\d+/.test(up)) return { error: 'Esse link é de uma página de produto (MLBU…), que pode ter vários anúncios. Abra um anúncio específico e cole o link dele.' };
+      return { error: 'Não encontrei o código do anúncio (MLB…) nesse texto.' };
+    }
+    if (m[1] !== 'MLB') return { error: 'Só dá para copiar anúncios do Mercado Livre Brasil (códigos MLB…).' };
+    return { id: 'MLB' + m[2] };
+  }
+
+  async function crCopyFromLink() {
+    const p = crParseItemId($('cr-copy-url')?.value);
+    if (p.error) { toast(p.error, 'warn', 7000); return; }
+    const btn = $('btn-cr-copy-url'); if (btn) btn.disabled = true;
+    try { await crLoadTemplate(p.id); } finally { if (btn) btn.disabled = false; }
   }
 
   function crRestore(saved) {
+    if (state.cr.busy) { toast('Espere a validação/publicação em andamento terminar', 'warn'); return; }
     $('cr-restore')?.classList.add('hidden');
-    crSelectCategory(saved.draft.category_id, [], saved.draft).then(() => crFillSender(saved.autosender));
+    crSelectCategory(saved.draft.category_id, [], saved.draft, () => {
+      state.cr.gen++;
+      crFillSender(saved.autosender);
+      crApplyBatchState(saved);
+      // a batch cut short (closed tab) may have left new listings without their Auto Sender settings
+      state.cr.senderSynced = saved.sender_synced !== false;
+      if (!state.cr.senderSynced) setTimeout(async () => {
+        const items = Object.values(state.cr.batchRes).filter(r => r.status === 'ok' && /^MLB\d+$/.test(String(r.id))).map(r => ({ id: r.id, title: r.title }));
+        const sender = crCollectSender();
+        if (!items.length || !(sender.enabled || sender.product_key || sender.messages.some(m => String(m).trim()))) { state.cr.senderSynced = true; return; }
+        const res = await crSaveSender(items, sender);
+        if (res !== 'fail') { toast(`Envio automático conferido nos ${items.length} anúncio(s) já criados por este rascunho`, 'ok', 5000); crSaveDraft(); }
+        else toast('Não consegui salvar o envio automático dos anúncios já criados — confira em Produtos', 'err', 8000);
+      }, 0);
+    });
   }
 
+  // formats, prices, title variations, ticked/unticked rows and — so that a
+  // reload can never publish them again — the listings already created
+  function crApplyBatchState(saved) {
+    const f = saved && saved.formats;
+    if (f) {
+      $('cr-fmt-classic').checked = !!f.classic?.on; $('cr-price').value = f.classic?.price ?? '';
+      $('cr-fmt-premium').checked = !!f.premium?.on; $('cr-price-premium').value = f.premium?.price ?? '';
+    }
+    state.cr.vars = Array.isArray(saved?.title_vars) ? saved.title_vars.map(x => String(x ?? '')).slice(0, CR_MAX_VARS) : [];
+    const sel = saved?.batch_sel && typeof saved.batch_sel === 'object' ? Object.entries(saved.batch_sel)
+      : (Array.isArray(saved?.batch_off) ? saved.batch_off.map(k => [k, false]) : []);
+    state.cr.batchSel = new Map(sel.map(([k, v]) => [String(k), !!v]));
+    state.cr.batchRes = {};
+    for (const [k, r] of Object.entries(saved?.batch_done || {})) {
+      if (!r || !['ok', 'unknown'].includes(r.status)) continue;
+      state.cr.batchRes[k] = { status: r.status, id: String(r.id || ''), permalink: String(r.permalink || ''), live: String(r.live || ''),
+        title: String(r.title || ''), lt: String(r.lt || ''), price: Number(r.price) || 0,
+        msg: r.status === 'unknown' ? 'sem resposta na última tentativa — confira em Produtos se ele foi criado antes de tentar de novo' : '' };
+    }
+  }
+
+  function crSaveDraft() {
+    clearTimeout(state.cr.saveT);
+    if (!state.cr.cat) return;
+    const done = {}, sel = Object.fromEntries(state.cr.batchSel);
+    for (const [k, r] of Object.entries(state.cr.batchRes)) {
+      // a request in flight is saved as "no answer" (and unticked): if the tab
+      // dies now, the listing may still have been created
+      const st = r.status === 'publishing' ? 'unknown' : r.status;
+      if (r.status === 'publishing') sel[k] = false;
+      if (['ok', 'unknown'].includes(st)) done[k] = { status: st, id: r.id || '', permalink: r.permalink || '', live: r.live || '', title: r.title || '', lt: r.lt || '', price: r.price || 0 };
+    }
+    try {
+      localStorage.setItem(CR_DRAFT_KEY, JSON.stringify({ saved_at: Date.now(), draft: crCollectDraft(), autosender: crCollectSender(),
+        formats: { classic: { on: !!$('cr-fmt-classic')?.checked, price: $('cr-price')?.value || '' }, premium: { on: !!$('cr-fmt-premium')?.checked, price: $('cr-price-premium')?.value || '' } },
+        title_vars: state.cr.vars, batch_sel: sel, batch_done: done, sender_synced: state.cr.senderSynced !== false }));
+      const s = $('cr-draft-status'); if (s) s.textContent = `rascunho salvo ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+    } catch { /* armazenamento cheio/indisponível */ }
+  }
   function crAutosave() {
     clearTimeout(state.cr.saveT);
-    state.cr.saveT = setTimeout(() => {
-      if (!state.cr.cat) return;
-      try {
-        localStorage.setItem(CR_DRAFT_KEY, JSON.stringify({ saved_at: Date.now(), draft: crCollectDraft(), autosender: crCollectSender() }));
-        const s = $('cr-draft-status'); if (s) s.textContent = `rascunho salvo ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
-      } catch { /* armazenamento cheio/indisponível */ }
-    }, 800);
+    state.cr.saveT = setTimeout(crSaveDraft, 800);
+  }
+
+  function crFormatsAll() {
+    return CR_FMT.map(f => ({ ...f, on: !!$(f.check)?.checked, priceVal: crNum($(f.price)?.value) }));
+  }
+  function crFormatUI() {
+    for (const f of crFormatsAll()) $(f.row)?.classList.toggle('off', !f.on);
+  }
+
+  // one fee lookup per category + price (cached; concurrent calls share it)
+  async function crFeeAt(price) {
+    const key = `${state.cr.cat?.id}|${Number(price).toFixed(2)}`;
+    if (!state.cr.feeCache.has(key)) {
+      const p = api(`/api/create/fees?price=${Number(price).toFixed(2)}&category_id=${encodeURIComponent(state.cr.cat?.id || '')}`);
+      state.cr.feeCache.set(key, p);
+      p.catch(() => state.cr.feeCache.delete(key));
+    }
+    return state.cr.feeCache.get(key);
   }
 
   async function crFees() {
     const box = $('cr-fees');
-    const price = Number(String($('cr-price')?.value || '').replace(',', '.'));
     if (!box) return;
-    if (!state.cr.cat || !(price > 0)) { box.innerHTML = ''; return; }
+    const seq = ++state.cr.feeSeq;
+    const fm = crFormatsAll();
+    const netBy = {};
+    const lines = {};
+    if (state.cr.cat) {
+      for (const f of fm) {
+        if (!f.on || !(f.priceVal > 0)) continue;
+        try {
+          const x = (await crFeeAt(f.priceVal) || []).find(z => z.listing_type_id === f.lt);
+          if (!x) { lines[f.lt] = 'tarifa não informada pelo ML'; continue; }
+          netBy[f.lt] = { price: f.priceVal, net: x.net };
+          lines[f.lt] = `Tarifa ${crBrl(x.fee)}${x.percentage ? ` (${String(x.percentage).replace('.', ',')}%${x.fixed_fee ? ' + ' + crBrl(x.fixed_fee) : ''})` : ''} · Você recebe ${crBrl(x.net)}`;
+        } catch (e) { lines[f.lt] = 'não consegui consultar a tarifa'; }
+      }
+    }
+    if (seq !== state.cr.feeSeq) return; // a newer calculation is on its way
+    state.cr.netBy = netBy;
+    for (const f of fm) { const e = $(f.fee); if (e) e.textContent = lines[f.lt] || ''; }
+    box.innerHTML = '';
+    if (Object.keys(lines).length) box.appendChild(el('div', {}, 'Valores estimados pelo Mercado Livre, antes de impostos e frete.'));
+    const nc = netBy.gold_special?.net, np = netBy.gold_pro?.net;
+    if (nc != null && np != null) {
+      const d = np - nc;
+      box.appendChild(el('div', {}, Math.abs(d) < 0.01 ? 'Você recebe o mesmo valor nos dois formatos.'
+        : `No Premium você recebe ${crBrl(Math.abs(d))} ${d > 0 ? 'a mais' : 'a menos'} por venda que no Clássico.`));
+    }
+    crRenderBatch();
+  }
+
+  // Premium price that leaves the same net as the Clássico. Fees are a
+  // percentage plus, on cheap items, a fixed amount that disappears above a
+  // price threshold — so the net jumps there. The net only grows with the
+  // price, so after the estimate the cheapest price that reaches the target is
+  // found by bisection between the last price that fell short and the first
+  // that reached it, every point checked with Mercado Livre's own fee table.
+  async function crMatchNet() {
+    if (!state.cr.cat) return;
+    const pc = crNum($('cr-price')?.value);
+    if (!(pc > 0)) { toast('Informe primeiro o preço do Clássico', 'warn'); return; }
+    const btn = $('btn-cr-match-net'), label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Calculando…'; }
     try {
-      const fees = await api(`/api/create/fees?price=${price}&category_id=${encodeURIComponent(state.cr.cat.id)}`);
-      state.cr.fees = fees;
-      box.innerHTML = '';
-      const brl = n => `R$ ${Number(n).toFixed(2).replace('.', ',')}`;
-      fees.forEach(f => {
-        const card = el('div', { class: 'cr-fee' + ($('cr-type')?.value === f.listing_type_id ? ' sel' : '') });
-        card.append(el('strong', {}, f.name),
-          el('span', {}, `Tarifa: ${brl(f.fee)}${f.percentage ? ` (${f.percentage}%${f.fixed_fee ? ' + ' + brl(f.fixed_fee) : ''})` : ''}`),
-          el('span', { class: 'cr-net' }, `Você recebe ${brl(f.net)}`));
-        card.addEventListener('click', () => { $('cr-type').value = f.listing_type_id; crFees(); crAutosave(); });
-        box.appendChild(card);
-      });
-      box.appendChild(el('div', { class: 'muted small' }, 'Valores estimados pelo Mercado Livre, antes de impostos e frete.'));
-    } catch (e) { box.innerHTML = ''; }
+      const fc = (await crFeeAt(pc) || []).find(f => f.listing_type_id === 'gold_special');
+      if (!fc) { toast('O Mercado Livre não informou a tarifa do Clássico', 'warn'); return; }
+      const target = fc.net, tried = [];
+      const netAt = async p => { const fp = (await crFeeAt(p) || []).find(f => f.listing_type_id === 'gold_pro'); if (fp) tried.push({ price: p, net: fp.net }); return fp; };
+      let pp = pc;
+      for (let i = 0; i < 6; i++) {
+        const fp = await netAt(pp);
+        if (!fp) break;
+        if (fp.net >= target - 0.005) break;
+        const pct = (Number(fp.percentage) || 0) / 100;
+        let next = pct > 0 && pct < 0.9 ? (target + (Number(fp.fixed_fee) || 0)) / (1 - pct) : pp + (target - fp.net) * 1.25;
+        next = Math.ceil(next * 100 - 1e-6) / 100;
+        if (next <= pp || tried.some(t => Math.abs(t.price - next) < 0.005)) next = Math.ceil((pp * 1.1) * 100) / 100;
+        pp = next;
+      }
+      const reach = () => tried.filter(t => t.net >= target - 0.005).sort((a, b) => a.price - b.price)[0];
+      const short = () => tried.filter(t => t.net < target - 0.005).sort((a, b) => b.price - a.price)[0];
+      let hi = reach(), lo = short();
+      for (let i = 0; i < 14 && hi && lo && hi.price - lo.price > 0.011; i++) {
+        const mid = Math.round((lo.price + hi.price) / 2 * 100) / 100;
+        if (mid <= lo.price || mid >= hi.price) break;
+        const fp = await netAt(mid);
+        if (!fp) break;
+        if (fp.net >= target - 0.005) hi = { price: mid, net: fp.net }; else lo = { price: mid, net: fp.net };
+      }
+      const pick = hi;
+      if (!pick) { toast('Não consegui calcular o preço do Premium — preencha à mão', 'warn'); return; }
+      $('cr-price-premium').value = pick.price.toFixed(2);
+      $('cr-fmt-premium').checked = true;
+      crFormatUI();
+      await crFees(); crOnEdit();
+      const diff = pick.net - target;
+      toast(Math.abs(diff) < 0.05
+        ? `Premium a ${crBrl(pick.price)}: você recebe ${crBrl(pick.net)}, igual ao Clássico`
+        : `Premium a ${crBrl(pick.price)}: você recebe ${crBrl(pick.net)} — ${crBrl(diff)} a mais que no Clássico (${crBrl(target)}). Por causa da faixa de tarifa do Mercado Livre, é o menor preço que não fica abaixo.`, 'ok', 8000);
+    } catch (e) { toast(e.message, 'err'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
+  }
+
+  // ── títulos: principal + variações ──
+  function crTitles() {
+    const seen = new Set(), out = [];
+    for (const t of [$('cr-title')?.value || '', ...state.cr.vars]) {
+      const v = String(t || '').replace(/\s+/g, ' ').trim(), k = crFold(v);
+      if (!v || seen.has(k)) continue;
+      seen.add(k); out.push(v);
+    }
+    return out;
+  }
+  function crRenderVars() {
+    const box = $('cr-title-vars');
+    if (!box) return;
+    box.innerHTML = '';
+    const max = $('cr-title')?.maxLength > 0 ? $('cr-title').maxLength : 60;
+    state.cr.vars.forEach((t, i) => {
+      const row = el('div', { class: 'cr-var' });
+      const inp = el('input', { class: 'cr-var-input', maxlength: String(max), placeholder: 'Outro jeito de chamar o mesmo produto', 'aria-label': `Variação de título ${i + 1}` });
+      inp.value = t;
+      const cnt = el('span', { class: 'muted small cr-var-count' }, `${t.length}/${max}`);
+      inp.addEventListener('input', () => { state.cr.vars[i] = inp.value; cnt.textContent = `${inp.value.length}/${max}`; });
+      row.append(inp, cnt, el('button', { class: 'icon-btn', title: 'Remover variação', 'aria-label': 'Remover variação',
+        onclick: () => { state.cr.vars.splice(i, 1); crRenderVars(); crOnEdit(); } }, '✕'));
+      box.appendChild(row);
+    });
+  }
+  function crAddVar(text) {
+    if (state.cr.vars.length >= CR_MAX_VARS) { toast(`Até ${CR_MAX_VARS} variações de título`, 'warn'); return false; }
+    const t = String(text || '').trim();
+    if (t && crTitles().some(x => crFold(x) === crFold(t))) { toast('Esse título já está na lista', 'warn'); return false; }
+    state.cr.vars.push(t);
+    crRenderVars(); crOnEdit();
+    if (!t) $('cr-title-vars')?.querySelector('.cr-var:last-child input')?.focus();
+    return true;
+  }
+
+  // ── lista de anúncios a criar: títulos × formatos ──
+  const crKey = (lt, title) => `${lt}|${crFold(title)}`;
+  const crIsMade = r => !!r && (r.status === 'ok' || r.status === 'unknown'); // created, or maybe created
+  // formats that already have a listing created (or maybe created) from this draft
+  function crMadeFormats() {
+    const s = new Set();
+    for (const r of Object.values(state.cr.batchRes)) if (crIsMade(r) && r.lt) s.add(r.lt);
+    return s;
+  }
+  // Rows = titles × formats. A NEW row in a format that already has a listing
+  // from this draft starts unticked (editing the title after a partial batch
+  // must not silently create a second Clássico). Created rows stay listed —
+  // even after their title changed — so they can't be forgotten or redone.
+  function crVariants() {
+    const fm = crFormatsAll().filter(f => f.on), out = [], seen = new Set(), made = crMadeFormats();
+    for (const t of crTitles()) for (const f of fm) {
+      const key = crKey(f.lt, t);
+      seen.add(key);
+      const res = state.cr.batchRes[key];
+      const byDefault = !(made.has(f.lt) && !res);
+      const on = state.cr.batchSel.has(key) ? state.cr.batchSel.get(key) : byDefault;
+      out.push({ key, title: t, lt: f.lt, name: f.name, price: f.priceVal, on, res, heldBack: !byDefault && !state.cr.batchSel.has(key) });
+    }
+    for (const [key, res] of Object.entries(state.cr.batchRes)) {
+      if (seen.has(key) || !crIsMade(res) || !res.lt) continue;
+      const f = CR_FMT.find(x => x.lt === res.lt);
+      out.push({ key, title: res.title || '(título anterior)', lt: res.lt, name: f ? f.name : res.lt, price: res.price || 0, on: res.status === 'ok', res, orphan: true });
+    }
+    return out;
+  }
+  // rows that a click on Validar / Publicar would send
+  const crPending = all => all.filter(v => v.on && !v.orphan && v.res?.status !== 'ok');
+  function crDupWarning(newRows) {
+    const per = {};
+    const add = (lt, key) => { (per[lt] = per[lt] || new Set()).add(key); };
+    let fromMade = false;
+    for (const [k, r] of Object.entries(state.cr.batchRes)) if (crIsMade(r) && r.lt) add(r.lt, k);
+    for (const v of newRows) { if (per[v.lt] && !per[v.lt].has(v.key)) fromMade = true; add(v.lt, v.key); }
+    const dup = CR_FMT.filter(f => (per[f.lt]?.size || 0) > 1).map(f => f.name);
+    if (!dup.length) return '';
+    const where = dup.length > 1 ? 'no mesmo formato (Clássico e Premium)' : `no ${dup[0]}`;
+    return `Mais de um anúncio do mesmo produto ${where}${fromMade ? ', contando os que você já criou aqui' : ''}, mudando só o título: o Mercado Livre considera isso anúncio duplicado e pode desativá-los, mantendo só o de maior exposição. Já ter o mesmo produto em Clássico e em Premium costuma ser aceito, porque as condições de pagamento são diferentes.`;
+  }
+  function crBatchProblem(vs) {
+    if (!crFormatsAll().some(f => f.on)) return 'Marque pelo menos um formato: Clássico ou Premium.';
+    if (!vs.length) return 'Nenhum anúncio marcado na lista do passo 7.';
+    if (vs.length > CR_MAX_BATCH) return `Máximo de ${CR_MAX_BATCH} anúncios por vez — desmarque ${vs.length - CR_MAX_BATCH} na lista do passo 7.`;
+    const noPrice = [...new Set(vs.filter(v => !(v.price > 0)).map(v => v.name))];
+    if (noPrice.length) return `Informe o preço do ${noPrice.join(' e do ')}.`;
+    if (vs.some(v => v.title.length < 5)) return 'Cada título precisa ter pelo menos 5 letras.';
+    const max = $('cr-title')?.maxLength > 0 ? $('cr-title').maxLength : 60;
+    const long = vs.find(v => v.title.length > max);
+    if (long) return `O título "${long.title.slice(0, 40)}…" passa de ${max} caracteres.`;
+    return '';
+  }
+  function crErrText(res) {
+    return (res?.errors || []).map(e => e.pt || e.message || e.code).filter(Boolean).slice(0, 2).join(' · ') || 'recusado pelo Mercado Livre';
+  }
+  function crStatusNode(res) {
+    if (!res) return el('span', { class: 'muted' }, 'a criar');
+    if (res.status === 'publishing') return el('span', { class: 'muted' }, 'publicando…');
+    if (res.status === 'valid') return el('span', { class: 'cr-st-ok' }, '✓ validado');
+    if (res.status === 'invalid') return el('span', { class: 'cr-st-err' }, '✗ ' + (res.msg || 'recusado'));
+    if (res.status === 'error') return el('span', { class: 'cr-st-err' }, '✗ ' + (res.msg || 'erro'));
+    if (res.status === 'unknown') return el('span', { class: 'cr-st-warn' }, '⚠ ' + (res.msg || 'sem resposta'));
+    if (res.status === 'ok') {
+      const s = el('span', { class: 'cr-st-ok' }, `✓ ${res.id}${res.live === 'paused' ? ' (pausado)' : ''} `);
+      const href = crSafeUrl(res.permalink);
+      if (href) s.appendChild(el('a', { href, target: '_blank', rel: 'noopener' }, 'abrir ↗'));
+      return s;
+    }
+    return el('span');
+  }
+  // net for a row only if it was computed for this exact price
+  function crNetFor(v) {
+    const nb = state.cr.netBy[v.lt];
+    return nb && v.price > 0 && Math.abs(nb.price - v.price) < 0.005 ? nb.net : null;
+  }
+  function crRenderBatch() {
+    const box = $('cr-batch');
+    if (!box) return;
+    const all = crVariants(), live = all.filter(v => !v.orphan), pend = crPending(all);
+    const nT = crTitles().length, nF = crFormatsAll().filter(f => f.on).length;
+    const done = all.filter(v => v.res?.status === 'ok').length;
+    const cnt = $('cr-batch-count');
+    if (cnt) cnt.textContent = live.length > 1 || done ? `→ ${pend.length} anúncio(s) a criar${done ? ` · ${done} já criado(s)` : ''} (${nT} título${nT > 1 ? 's' : ''} × ${nF} formato${nF > 1 ? 's' : ''}) — confira a lista no passo 7.` : '';
+    box.innerHTML = '';
+    if (!all.length) { box.appendChild(el('div', { class: 'muted small' }, nF ? 'Escreva o título no passo 2.' : 'Marque pelo menos um formato (Clássico ou Premium) no passo 2.')); return; }
+    const t = el('table', { class: 'table cr-batch-table' });
+    const hr = el('tr');
+    ['', 'Título', 'Formato', 'Preço', 'Você recebe', 'Situação'].forEach((h, i) => hr.appendChild(el('th', { class: i === 3 || i === 4 ? 'num' : '' }, h)));
+    t.appendChild(el('thead', {}, hr));
+    const tb = el('tbody');
+    for (const v of all) {
+      const res = v.res;
+      const tr = el('tr', { class: (v.on ? '' : 'off') + (v.orphan ? ' orphan' : '') });
+      const cb = el('input', { type: 'checkbox', 'aria-label': `Criar "${v.title}" no ${v.name}` });
+      cb.checked = v.on;
+      if (v.orphan || res?.status === 'ok' || res?.status === 'publishing' || state.cr.busy) cb.disabled = true;
+      cb.addEventListener('change', () => { state.cr.batchSel.set(v.key, cb.checked); crRenderBatch(); crAutosave(); });
+      const net = v.orphan ? null : crNetFor(v);
+      let st = crStatusNode(res);
+      if (!res && v.heldBack) st = el('span', { class: 'muted' }, `já existe um ${v.name} criado aqui — marque só se quiser outro`);
+      tr.append(el('td', {}, cb), el('td', { class: 'cr-batch-title' }, v.title), el('td', {}, v.name),
+        el('td', { class: 'num' }, v.price > 0 ? crBrl(v.price) : '—'),
+        el('td', { class: 'num' }, net != null ? crBrl(net) : '—'),
+        el('td', { class: 'cr-batch-st' }, st));
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+    box.appendChild(el('div', { class: 'table-wrap' }, t));
+    if (pend.length > CR_MAX_BATCH) box.appendChild(el('div', { class: 'cr-warn err' }, `Máximo de ${CR_MAX_BATCH} anúncios por vez — desmarque ${pend.length - CR_MAX_BATCH}.`));
+    const dup = crDupWarning(pend);
+    if (dup) box.appendChild(el('div', { class: 'cr-warn' }, '⚠ ' + dup));
+  }
+
+  // only one of Validar / Publicar at a time, and nothing that changes the
+  // starting point (another listing, reset, draft) while it runs
+  function crBusyUI() {
+    const b = state.cr.busy;
+    ['btn-cr-publish', 'btn-cr-publish-paused', 'btn-cr-validate', 'btn-cr-reset', 'btn-cr-copy-url'].forEach(id => { const x = $(id); if (x) x.disabled = !!b; });
+    const v = $('btn-cr-validate');
+    if (v) v.textContent = b === 'validate' ? 'Validando…' : '✔ Validar no Mercado Livre';
+    crRenderBatch();
   }
 
   // ── Fotos: redimensiona no navegador (máx. 1920 px, JPEG) e envia ao ML ──
@@ -3349,60 +3669,216 @@
     return '';
   }
 
+  // Problems before sending anything: the shared data, then the list itself.
+  function crPreCheck(base, all) {
+    const pend = crPending(all);
+    if (!pend.length && all.some(v => v.res?.status === 'ok')) return { done: true };
+    return { prob: crLocalCheck(base) || crBatchProblem(pend), pend };
+  }
+
   async function crValidate() {
-    const d = crCollectDraft();
-    const prob = crLocalCheck(d);
-    if (prob) { crResult(el('div', { class: 'test-result err' }, prob)); return false; }
-    const btn = $('btn-cr-validate'); btn.disabled = true; btn.textContent = 'Validando…';
+    if (state.cr.busy) return false;
+    clearTimeout(state.cr.feeT);
+    const base = crCollectDraft();
+    const pc = crPreCheck(base, crVariants());
+    if (pc.done) { crResult(el('div', { class: 'test-result ok' }, 'Os anúncios marcados já foram criados.')); return true; }
+    if (pc.prob) { crResult(el('div', { class: 'test-result err' }, pc.prob)); return false; }
+    const vs = pc.pend;
+    state.cr.busy = 'validate'; crBusyUI();
+    const BR = state.cr.batchRes, gen = state.cr.gen;
+    const warnings = new Set();
     try {
-      const r = await api('/api/create/validate', { method: 'POST', body: { draft: d } });
-      if (r.ok) {
-        const ok = el('div', { class: 'test-result ok' }, '✓ Tudo certo — o Mercado Livre aceitaria este anúncio.');
-        (r.warnings || []).forEach(w => ok.appendChild(el('div', { class: 'muted small' }, `Aviso: ${w.message}`)));
-        crResult(ok);
-      } else crResult(crShowErrors(r));
-      return !!r.ok;
+      for (let i = 0; i < vs.length; i++) {
+        const v = vs[i];
+        const r = await api('/api/create/validate', { method: 'POST', body: { draft: { ...base, title: v.title, listing_type_id: v.lt, price: v.price } } });
+        if (gen !== state.cr.gen) return false; // the starting point changed meanwhile
+        (r.warnings || []).forEach(w => w && w.message && warnings.add(w.message));
+        // a validation never overwrites a listing that exists (or may exist)
+        const cur = BR[v.key];
+        if (!cur || ['valid', 'invalid', 'error'].includes(cur.status)) BR[v.key] = r.ok ? { status: 'valid' } : { status: 'invalid', msg: crErrText(r) };
+        crRenderBatch();
+        if (!r.ok) {
+          // problems in the shared data (photos, technical sheet) repeat in every listing: stop at the first
+          const node = crShowErrors(r);
+          if (vs.length > 1) node.prepend(el('div', { class: 'small', style: 'margin-bottom:6px' }, `Problema em "${v.title}" (${v.name}) — ${i ? `${i} anterior(es) validado(s); ` : ''}corrija e valide de novo.`));
+          crResult(node);
+          return false;
+        }
+      }
+      const ok = el('div', { class: 'test-result ok' }, vs.length > 1 ? `✓ Tudo certo — o Mercado Livre aceitaria os ${vs.length} anúncios.` : '✓ Tudo certo — o Mercado Livre aceitaria este anúncio.');
+      warnings.forEach(w => ok.appendChild(el('div', { class: 'muted small' }, `Aviso: ${w}`)));
+      crResult(ok);
+      return true;
     } catch (e) { crResult(el('div', { class: 'test-result err' }, e.message)); return false; }
-    finally { btn.disabled = false; btn.textContent = '✔ Validar no Mercado Livre'; }
+    finally { state.cr.busy = ''; crBusyUI(); }
+  }
+
+  // Did this failed call certainly NOT create the listing? Only an explicit
+  // refusal counts; a lost answer or a server error may have come after
+  // Mercado Livre created it — those become "sem resposta", never "retry".
+  function crCertainFailure(e) {
+    if (e.network || e.data?.uncertain || Number(e.data?.status) >= 500) return false;
+    if (e.status === 429 || e.data?.status === 429 || e.status === 401) return true;
+    return e.status >= 400 && e.status < 500 && !!e.data && (Array.isArray(e.data.errors) || e.data.ok === false);
   }
 
   async function crPublish(status) {
-    const d = crCollectDraft();
-    const prob = crLocalCheck(d);
-    if (prob) { crResult(el('div', { class: 'test-result err' }, prob)); return; }
+    if (state.cr.busy) return;
+    clearTimeout(state.cr.feeT);
+    await crFees(); // "você recebe" in the confirmation must match the prices on screen
+    const base = crCollectDraft();
+    const all = crVariants();
+    const pc = crPreCheck(base, all);
+    if (pc.done) { toast('Os anúncios marcados já foram criados', 'warn'); return; }
+    if (pc.prob) { crResult(el('div', { class: 'test-result err' }, pc.prob)); return; }
+    const vs = pc.pend;
     const sender = crCollectSender();
-    const fee = (state.cr.fees || []).find(f => f.listing_type_id === d.listing_type_id);
-    const lines = [`"${d.title}"`, `Preço: R$ ${d.price.toFixed(2).replace('.', ',')}${fee ? ` · você recebe ~R$ ${Number(fee.net).toFixed(2).replace('.', ',')}` : ''}`,
-      `Estoque: ${d.available_quantity} · ${d.listing_type_id === 'gold_pro' ? 'Premium' : 'Clássico'}`,
-      status === 'paused' ? 'Será criado PAUSADO (você ativa quando quiser).' : 'Será publicado ATIVO — já pode receber vendas.',
-      sender.enabled ? 'Envio automático: LIGADO para este anúncio.' : 'Envio automático: desligado.'];
-    if (!await confirm(status === 'paused' ? 'Publicar pausado' : 'Publicar agora', lines.join('\n'), status === 'paused' ? 'Publicar pausado' : 'Publicar')) return;
-    const btns = ['btn-cr-publish', 'btn-cr-publish-paused', 'btn-cr-validate'].map($).filter(Boolean);
-    btns.forEach(b => b.disabled = true);
-    crResult(el('div', { class: 'muted small' }, 'Publicando no Mercado Livre…'));
+    const paused = status === 'paused';
+    const node = el('div', { class: 'cr-confirm' });
+    node.appendChild(el('p', {}, vs.length > 1 ? `Serão criados ${vs.length} anúncios:` : 'Será criado 1 anúncio:'));
+    const ul = el('ul', { class: 'cr-confirm-list' });
+    vs.forEach(v => { const n = crNetFor(v); ul.appendChild(el('li', {}, `${v.name} · ${crBrl(v.price)}${n != null ? ` (você recebe ~${crBrl(n)})` : ''} — "${v.title}"`)); });
+    node.appendChild(ul);
+    node.appendChild(el('p', {}, `Estoque: ${base.available_quantity} em cada. ${paused ? 'Criados PAUSADOS — você ativa quando quiser.' : 'Publicados ATIVOS — já podem receber vendas.'}`));
+    node.appendChild(el('p', {}, sender.enabled ? 'Envio automático: LIGADO nos anúncios novos.' : 'Envio automático: desligado.'));
+    const usesKey = sender.messages.some(m => String(m).includes('{key}'));
+    if (sender.enabled && usesKey && sender.key_mode !== 'fixed')
+      node.appendChild(el('p', { class: 'cr-warn' }, '🔑 Este produto usa estoque de chaves: os anúncios novos começam SEM chaves. Cadastre as chaves deles em "Chaves" antes de vender — sem chave, a venda não é atendida automaticamente (você é avisado).'));
+    else if (sender.enabled && usesKey && !sender.product_key)
+      node.appendChild(el('p', { class: 'cr-warn' }, '🔑 As mensagens usam {key}, mas a chave está vazia: nada será enviado aos compradores até você preencher a chave (no passo 6 ou depois, em Produtos).'));
+    const dup = crDupWarning(vs);
+    if (dup) node.appendChild(el('p', { class: 'cr-warn' }, '⚠ ' + dup));
+    const unknown = vs.filter(v => v.res?.status === 'unknown').length;
+    if (unknown) node.appendChild(el('p', { class: 'cr-warn' }, unknown === 1
+      ? '⚠ Um deles ficou sem resposta na tentativa anterior e pode já ter sido criado. Confira em Produtos antes de continuar.'
+      : `⚠ ${unknown} deles ficaram sem resposta na tentativa anterior e podem já ter sido criados. Confira em Produtos antes de continuar.`));
+    const okLabel = paused ? (vs.length > 1 ? `Publicar ${vs.length} pausados` : 'Publicar pausado') : (vs.length > 1 ? `Publicar ${vs.length}` : 'Publicar');
+    if (state.cr.busy || !await confirmNode(paused ? 'Publicar pausado' : 'Publicar agora', node, okLabel)) return;
+    if (state.cr.busy) return;
+
+    state.cr.busy = 'publish'; crBusyUI();
+    const BR = state.cr.batchRes, gen = state.cr.gen; // a new starting point can't receive these results
+    // everything confirmed stays chosen: a stop (pause, closed tab) can't "unpick" it later
+    vs.forEach(v => state.cr.batchSel.set(v.key, true));
+    const wantsSender = !!(sender.enabled || sender.product_key || sender.messages.some(m => String(m).trim()));
+    if (wantsSender) state.cr.senderSynced = false;
+    crResult(el('div', { class: 'muted small' }, vs.length > 1 ? `Publicando ${vs.length} anúncios no Mercado Livre, um de cada vez…` : 'Publicando no Mercado Livre…'));
+    const created = [], failed = [];
+    let stopped = '';
     try {
-      const r = await api('/api/create/publish', { method: 'POST', body: { draft: d, status, autosender: sender } });
-      const ok = el('div', { class: 'test-result ok' });
-      ok.append(el('strong', {}, `✓ Anúncio criado: ${r.id} (${r.status === 'paused' ? 'pausado' : 'ativo'})`), el('br'));
-      if (r.permalink) ok.appendChild(el('a', { href: r.permalink, target: '_blank', rel: 'noopener' }, 'Abrir no Mercado Livre ↗'));
-      (r.warnings || []).forEach(w => ok.appendChild(el('div', { class: 'small', style: 'color:var(--warning);margin-top:6px' }, `⚠ ${w.message}`)));
-      if (r.autosender) ok.appendChild(el('div', { class: 'muted small', style: 'margin-top:6px' }, 'Envio automático ativado para este anúncio.'));
-      crResult(ok);
-      toast('Anúncio publicado!', 'ok');
-      localStorage.removeItem(CR_DRAFT_KEY);
-      state.products = []; // força recarregar a lista com o anúncio novo
-      api('/api/products').then(p => { state.products = p; crRenderCopyList(); }).catch(() => {});
-    } catch (e) {
-      const res = e.data && (e.data.errors || e.data.warnings) ? e.data : { errors: [{ message: e.message }] };
-      crResult(crShowErrors(res));
-    } finally { btns.forEach(b => b.disabled = false); }
+      for (let i = 0; i < vs.length; i++) {
+        if (gen !== state.cr.gen) { stopped = 'Publicação interrompida: você começou outro anúncio.'; break; }
+        const v = vs[i];
+        const prevUnknown = BR[v.key]?.status === 'unknown' ? BR[v.key] : null;
+        BR[v.key] = { status: 'publishing', title: v.title, lt: v.lt, price: v.price };
+        crRenderBatch();
+        crSaveDraft(); // saved as "no answer" while in flight: a closed tab can't lead to a blind resend
+        try {
+          // each listing carries its Auto Sender settings (a batch cut short still leaves every created one configured)
+          const r = await api('/api/create/publish', { method: 'POST', body: { draft: { ...base, title: v.title, listing_type_id: v.lt, price: v.price }, status, ...(wantsSender ? { autosender: sender } : {}) } });
+          BR[v.key] = { status: 'ok', id: r.id, permalink: r.permalink || '', live: r.status, warnings: r.warnings || [], title: v.title, lt: v.lt, price: v.price };
+          created.push({ v, r });
+        } catch (e) {
+          if (crCertainFailure(e)) {
+            const res = e.data && (e.data.errors || e.data.warnings) ? e.data : { errors: [{ message: e.message }] };
+            BR[v.key] = prevUnknown || { status: 'error', msg: crErrText(res), res, title: v.title, lt: v.lt, price: v.price };
+            if (e.status === 429 || e.data?.status === 429) stopped = 'O Mercado Livre pediu uma pausa (limite de requisições). Os que faltaram continuam marcados — publique de novo em alguns minutos.';
+          } else {
+            // maybe created: unticked, so a later "Publicar" doesn't resend it unless you tick it again
+            BR[v.key] = { status: 'unknown', msg: 'sem resposta — confira em Produtos se ele foi criado; só marque de novo se não foi', title: v.title, lt: v.lt, price: v.price };
+            if (gen === state.cr.gen) state.cr.batchSel.set(v.key, false);
+          }
+          failed.push({ v, e });
+        }
+        if (gen === state.cr.gen) { crRenderBatch(); crSaveDraft(); } // created ones are saved at once: a reload can't redo them
+        if (stopped) break;
+        if (i < vs.length - 1) await new Promise(r => setTimeout(r, CR_GAP_MS));
+      }
+      // Auto Sender settings once more for all new listings in a single write —
+      // reconciles any per-listing save lost to KV's eventual consistency
+      let senderRes = '';
+      if (created.length && wantsSender) senderRes = await crSaveSender(created.map(c => ({ id: c.r.id, title: c.v.title })), sender);
+      else if (!created.length) state.cr.senderSynced = true;
+      if (created.length) {
+        toast(created.length > 1 ? `${created.length} anúncios publicados!` : 'Anúncio publicado!', 'ok');
+        state.products = []; // força recarregar a lista com os anúncios novos
+        api('/api/products').then(p => { state.products = p; crRenderCopyList(); }).catch(() => {});
+      }
+      if (gen !== state.cr.gen) { if (stopped) toast(`${stopped} ${created.length} criado(s) antes disso.`, 'warn', 8000); return; }
+      crResult(crBatchResultNode(created, failed, stopped, senderRes, sender));
+      if (!failed.length && !stopped && !crPending(crVariants()).length) localStorage.removeItem(CR_DRAFT_KEY);
+      else crSaveDraft();
+    } finally { state.cr.busy = ''; crBusyUI(); }
+  }
+
+  async function crSaveSender(items, sender) {
+    try {
+      await api('/api/create/sender_bulk', { method: 'POST', body: { items, autosender: sender } });
+      state.cr.pendingSender = null;
+      state.cr.senderSynced = true;
+      return sender.enabled ? 'on' : 'saved';
+    } catch (e) { state.cr.pendingSender = { items, sender }; return 'fail'; }
+  }
+
+  function crBatchResultNode(created, failed, stopped, senderRes, sender) {
+    const box = el('div', { class: 'test-result ' + (failed.length || stopped || senderRes === 'fail' ? (created.length ? 'warn' : 'err') : 'ok') });
+    if (created.length === 1 && !failed.length) {
+      const r = created[0].r;
+      box.append(el('strong', {}, `✓ Anúncio criado: ${r.id} (${r.status === 'paused' ? 'pausado' : 'ativo'})`), el('br'));
+      const href = crSafeUrl(r.permalink);
+      if (href) box.appendChild(el('a', { href, target: '_blank', rel: 'noopener' }, 'Abrir no Mercado Livre ↗'));
+    } else if (created.length) {
+      box.appendChild(el('strong', {}, `✓ ${created.length} anúncio(s) criado(s)`));
+      const ul = el('ul', { class: 'cr-errors' });
+      created.forEach(({ v, r }) => {
+        const li = el('li', {}, `${r.id} · ${v.name} · ${crBrl(v.price)} — ${v.title} `);
+        const href = crSafeUrl(r.permalink);
+        if (href) li.appendChild(el('a', { href, target: '_blank', rel: 'noopener' }, 'abrir ↗'));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+    const warns = new Set();
+    created.forEach(({ r }) => (r.warnings || []).forEach(w => w && w.message && warns.add(w.message)));
+    warns.forEach(w => box.appendChild(el('div', { class: 'small', style: 'color:var(--warning);margin-top:6px' }, `⚠ ${w}`)));
+    if (senderRes === 'on') box.appendChild(el('div', { class: 'muted small', style: 'margin-top:6px' }, created.length > 1 ? 'Envio automático ativado nos anúncios novos.' : 'Envio automático ativado para este anúncio.'));
+    if (senderRes === 'fail') {
+      const w = el('div', { class: 'small', style: 'margin-top:8px' }, '⚠ Os anúncios foram criados, mas não consegui salvar o envio automático deles. ');
+      w.appendChild(el('button', { class: 'btn ghost sm', onclick: async ev => {
+        const b = ev.currentTarget; b.disabled = true;
+        const p = state.cr.pendingSender;
+        const res = p ? await crSaveSender(p.items, p.sender) : 'fail';
+        if (res === 'fail') { b.disabled = false; toast('Ainda não consegui salvar — tente de novo em instantes', 'err'); }
+        else { w.textContent = '✓ Envio automático salvo nos anúncios novos.'; }
+      } }, 'Tentar de novo'));
+      box.appendChild(w);
+    }
+    if (failed.length) {
+      box.appendChild(el('div', { class: 'small', style: 'margin-top:8px' }, `${failed.length} não foi(ram) criado(s):`));
+      const ul = el('ul', { class: 'cr-errors' });
+      failed.forEach(({ v }) => ul.appendChild(el('li', {}, `${v.name} — "${v.title}": ${state.cr.batchRes[v.key]?.msg || 'erro'}`)));
+      box.appendChild(ul);
+    }
+    if (stopped) box.appendChild(el('div', { class: 'small', style: 'margin-top:8px' }, stopped));
+    void sender;
+    return box;
   }
 
   async function crReset() {
+    if (state.cr.busy) { toast('Espere a validação/publicação em andamento terminar', 'warn'); return; }
     if (!await confirm('Começar de novo', 'Apaga o rascunho atual deste navegador.', 'Apagar rascunho', true)) return;
+    if (state.cr.busy) return;
     localStorage.removeItem(CR_DRAFT_KEY);
+    state.cr.gen++;
     state.cr.cat = null; state.cr.pictures = []; state.cr.templateTerms = [];
-    ['cr-title', 'cr-price', 'cr-desc', 'cr-key', 'cr-predict-q', 'cr-warranty-time'].forEach(id => { if ($(id)) $(id).value = ''; });
+    state.cr.vars = []; state.cr.batchSel = new Map(); state.cr.batchRes = {}; state.cr.netBy = {}; state.cr.pendingSender = null;
+    crClearSender();
+    ['cr-title', 'cr-price', 'cr-price-premium', 'cr-desc', 'cr-key', 'cr-predict-q', 'cr-warranty-time', 'cr-copy-url'].forEach(id => { if ($(id)) $(id).value = ''; });
+    if ($('cr-warranty-type')) $('cr-warranty-type').value = '';
+    if ($('cr-fmt-classic')) $('cr-fmt-classic').checked = true;
+    if ($('cr-fmt-premium')) $('cr-fmt-premium').checked = false;
+    if ($('cr-title-options')) $('cr-title-options').innerHTML = '';
+    crSrcNote(null); crRenderVars(); crFormatUI(); crFees(); crWarrantyUI();
     if ($('cr-qty')) $('cr-qty').value = 1;
     document.querySelectorAll('#cr-sender-fields textarea').forEach(t => { t.value = ''; });
     if ($('cr-sender-on')) $('cr-sender-on').checked = false;
@@ -3432,13 +3908,855 @@
   }
 
   async function crAITitle() {
-    const btn = $('btn-cr-ai-title'); btn.disabled = true;
+    const btn = $('btn-cr-ai-title'), label = btn.textContent;
+    btn.disabled = true; btn.textContent = '✨ Pensando…';
     const box = $('cr-title-options'); box.innerHTML = '';
     try {
-      const r = await api('/api/create/ai_text', { method: 'POST', body: crAIBody('title') });
-      (r.options || []).forEach(o => box.appendChild(el('button', { class: 'btn ghost sm', onclick: () => { $('cr-title').value = o; crTitleCount(); box.innerHTML = ''; crAutosave(); } }, o)));
+      const r = await api('/api/create/ai_text', { method: 'POST', body: { ...crAIBody('title'), count: 5, avoid: crTitles() } });
+      const opts = (r.options || []).filter(o => !crTitles().some(t => crFold(t) === crFold(o)));
+      if (!opts.length) { toast('A IA não trouxe nomes novos — tente de novo', 'warn'); return; }
+      box.appendChild(el('div', { class: 'muted small' }, 'Sugestões da IA — revise antes de usar (ela pode errar):'));
+      opts.forEach(o => {
+        const row = el('div', { class: 'cr-sugg' });
+        const use = el('button', { class: 'btn ghost sm' }, 'Usar como principal');
+        use.addEventListener('click', () => { $('cr-title').value = o; crTitleCount(); row.remove(); crOnEdit(); });
+        const add = el('button', { class: 'btn dark sm' }, '+ Variação');
+        add.addEventListener('click', () => { if (crAddVar(o)) row.remove(); });
+        row.append(el('span', { class: 'cr-sugg-text' }, o), el('span', { class: 'muted small cr-var-count' }, String(o.length)), use, add);
+        box.appendChild(row);
+      });
     } catch (e) { toast(e.message, 'err', 7000); }
-    finally { btn.disabled = false; }
+    finally { btn.disabled = false; btn.textContent = label; }
+  }
+
+  // ════════════ ANÁLISE DE VENDAS (Estatísticas) ════════════
+  // Busca os pedidos do período direto do Mercado Livre (via Worker), localiza
+  // os compradores e calcula tudo aqui no navegador. Nada disso grava no KV.
+  const UF_INFO = {
+    AC: ['Acre', 'Norte', 0.83], AL: ['Alagoas', 'Nordeste', 3.13], AP: ['Amapá', 'Norte', 0.73], AM: ['Amazonas', 'Norte', 3.94],
+    BA: ['Bahia', 'Nordeste', 14.14], CE: ['Ceará', 'Nordeste', 8.79], DF: ['Distrito Federal', 'Centro-Oeste', 2.82], ES: ['Espírito Santo', 'Sudeste', 3.83],
+    GO: ['Goiás', 'Centro-Oeste', 7.06], MA: ['Maranhão', 'Nordeste', 6.78], MT: ['Mato Grosso', 'Centro-Oeste', 3.66], MS: ['Mato Grosso do Sul', 'Centro-Oeste', 2.76],
+    MG: ['Minas Gerais', 'Sudeste', 20.54], PA: ['Pará', 'Norte', 8.12], PB: ['Paraíba', 'Nordeste', 3.97], PR: ['Paraná', 'Sul', 11.44],
+    PE: ['Pernambuco', 'Nordeste', 9.06], PI: ['Piauí', 'Nordeste', 3.27], RJ: ['Rio de Janeiro', 'Sudeste', 16.05], RN: ['Rio Grande do Norte', 'Nordeste', 3.30],
+    RS: ['Rio Grande do Sul', 'Sul', 10.88], RO: ['Rondônia', 'Norte', 1.58], RR: ['Roraima', 'Norte', 0.64], SC: ['Santa Catarina', 'Sul', 7.61],
+    SP: ['São Paulo', 'Sudeste', 44.41], SE: ['Sergipe', 'Nordeste', 2.21], TO: ['Tocantins', 'Norte', 1.51],
+  }; // população: Censo IBGE 2022, em milhões
+  const POP_TOTAL = Object.values(UF_INFO).reduce((s, x) => s + x[2], 0);
+  const REGIONS = ['Norte', 'Nordeste', 'Centro-Oeste', 'Sudeste', 'Sul'];
+  // mapa esquemático: cada estado é um quadrado (coluna, linha)
+  const TILE_POS = { RR: [1, 0], AP: [2, 0], AM: [1, 1], PA: [2, 1], MA: [3, 1], CE: [4, 1], RN: [5, 1], AC: [0, 2], RO: [1, 2], MT: [2, 2],
+    TO: [3, 2], PI: [4, 2], PB: [5, 2], MS: [2, 3], GO: [3, 3], BA: [4, 3], PE: [5, 3], SP: [2, 4], DF: [3, 4], MG: [4, 4], AL: [5, 4],
+    PR: [2, 5], RJ: [3, 5], ES: [4, 5], SE: [5, 5], SC: [2, 6], RS: [2, 7] };
+  const WEEKDAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  const brl = v => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const brlShort = v => {
+    v = Number(v || 0);
+    if (Math.abs(v) >= 1e6) return 'R$ ' + (v / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' mi';
+    if (Math.abs(v) >= 1e4) return 'R$ ' + (v / 1e3).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' mil';
+    return 'R$ ' + v.toLocaleString('pt-BR', { maximumFractionDigits: 0 });
+  };
+  const pctf = (x, d = 1) => (Number.isFinite(x) ? (x * 100).toLocaleString('pt-BR', { maximumFractionDigits: d }) : '0') + '%';
+  const intf = v => Number(v || 0).toLocaleString('pt-BR');
+  const brDayOf = ms => new Date(ms - 3 * 3600000).toISOString().slice(0, 10);
+  // "dd/mm/aaaa hh:mm" in Brasília time, whatever the computer's time zone
+  const brDateTime = ms => { const x = new Date(ms - 3 * 3600000).toISOString(); return `${x.slice(8, 10)}/${x.slice(5, 7)}/${x.slice(0, 4)} ${x.slice(11, 16)}`; };
+  const brHourOf = ms => new Date(ms - 3 * 3600000).getUTCHours();
+  const brWdOf = ms => new Date(ms - 3 * 3600000).getUTCDay();
+  const addDays = (d, n) => new Date(Date.parse(d + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+  const fmtDay = d => d ? d.split('-').reverse().join('/') : '';
+  const fold = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+
+  state.an = { range: '30', uf: '', region: '', cache: {}, cur: null, prev: null, per: null, geo: { b: {}, s: {} }, claims: {}, log: [], busy: false };
+
+  function anStatus(t) { const s = $('an-status'); if (s) s.textContent = t || ''; }
+
+  const AN_MAX_BACK = 365; // a análise cobre até 12 meses para trás
+  function anPeriod() {
+    const today = brDayOf(Date.now());
+    const r = state.an.range;
+    let from, to = today;
+    if (r === 'custom') { from = $('an-from')?.value || ''; to = $('an-to')?.value || today; }
+    else if (r === 'month') from = today.slice(0, 8) + '01';
+    else if (r === 'lastmonth') { to = addDays(today.slice(0, 8) + '01', -1); from = to.slice(0, 8) + '01'; }
+    else from = addDays(today, -((parseInt(r) || 30) - 1));
+    if (!from || !/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return null;
+    if (to > today) to = today;
+    const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
+    let prevTo = addDays(from, -1), prevFrom = addDays(prevTo, -(days - 1));
+    if (r === 'month' || r === 'lastmonth') {
+      // mês corrente × mesmos dias do mês anterior; mês passado × o mês antes dele
+      prevFrom = addDays(from, -1).slice(0, 8) + '01';
+      prevTo = r === 'lastmonth' ? addDays(from, -1) : [addDays(prevFrom, days - 1), addDays(from, -1)].sort()[0];
+    }
+    const minDay = addDays(today, -AN_MAX_BACK);
+    return { from, to, days, prevFrom, prevTo, minDay, tooOld: from < minDay, cmpOk: prevFrom >= minDay };
+  }
+
+  function splitRange(from, to, maxDays = 31) {
+    const out = [];
+    for (let a = from; a <= to;) { let b = addDays(a, maxDays - 1); if (b > to) b = to; out.push([a, b]); a = addDays(b, 1); }
+    return out;
+  }
+
+  // Busca em janelas de até 31 dias; uma janela com mais de 1.000 pedidos é
+  // dividida ao meio (buscas muito longas por página podem ser cortadas pelo ML).
+  async function anFetchOrders(from, to, label) {
+    const out = [];
+    const windows = splitRange(from, to);
+    while (windows.length) {
+      const [a, b] = windows.shift();
+      let offset = 0;
+      for (let g = 0; g < 80; g++) {
+        let r;
+        try { r = await api(`/api/analytics/orders?from=${a}&to=${b}&offset=${offset}`); }
+        catch (e) {
+          if (e.data && Array.isArray(e.data.orders)) out.push(...e.data.orders);
+          return { orders: out, partial: e.message };
+        }
+        if (offset === 0 && r.total > 1000 && a < b) {
+          const half = Math.floor((Date.parse(b) - Date.parse(a)) / 86400000 / 2);
+          const mid = addDays(a, half);
+          windows.unshift([a, mid], [addDays(mid, 1), b]);
+          break;
+        }
+        out.push(...(r.orders || []));
+        anStatus(`${label}: ${intf(out.length)} pedido(s)…`);
+        if (r.next_offset == null) break;
+        offset = r.next_offset;
+        if (out.length >= 10000) return { orders: out, partial: 'limite de 10.000 pedidos por análise' };
+      }
+    }
+    return { orders: out, partial: '' };
+  }
+
+  // ── localização: cache no navegador (cidade do cadastro muda pouco) ──
+  const GEO_KEY = 'mlas_geo_v1', CLAIM_KEY = 'mlas_claims_v1', AN_LAST_KEY = 'mlas_an_last';
+  function geoLoad() {
+    try { const g = JSON.parse(localStorage.getItem(GEO_KEY) || '{}') || {}; return { b: g.b || {}, s: g.s || {} }; }
+    catch { return { b: {}, s: {} }; }
+  }
+  function geoSave(g) {
+    try {
+      const b = Object.entries(g.b);
+      if (b.length > 20000) g.b = Object.fromEntries(b.sort((x, y) => y[1][2] - x[1][2]).slice(0, 15000));
+      localStorage.setItem(GEO_KEY, JSON.stringify(g));
+    } catch { /* armazenamento cheio: segue só em memória */ }
+  }
+  function geoOf(o, g) {
+    const s = o.sh && g.s[o.sh];
+    if (s && s[0]) return { s: s[0], c: s[1] || '' };
+    const b = g.b[o.b];
+    return b ? { s: b[0] || '', c: b[1] || '' } : { s: '', c: '' };
+  }
+  async function anLocate(orders) {
+    const g = geoLoad(); const now = Date.now();
+    const fresh = e => e && now - e[2] < 90 * 86400000;
+    const okId = x => /^\d{1,20}$/.test(String(x || ''));
+    const buyers = [...new Set(orders.map(o => o.b).filter(okId))].filter(id => !fresh(g.b[id]));
+    const ships = [...new Set(orders.map(o => o.sh).filter(okId))].filter(id => !g.s[id]).slice(0, 150);
+    let i = 0, si = 0, multiget = true;
+    for (let guard = 0; guard < 200 && (i < buyers.length || si < ships.length); guard++) {
+      const bChunk = buyers.slice(i, i + (multiget ? 400 : 35));
+      const sChunk = bChunk.length ? [] : ships.slice(si, si + 10);
+      let r;
+      try { r = await api('/api/analytics/locate', { method: 'POST', body: { buyers: bChunk, shipments: sChunk, multiget } }); }
+      catch (e) { break; }
+      const rb = r.buyers || {}, rs = r.shipments || {};
+      for (const [id, v] of Object.entries(rb)) g.b[id] = [v.s || '', v.c || '', now];
+      for (const [id, v] of Object.entries(rs)) g.s[id] = [v.s || '', v.c || '', now];
+      multiget = r.multiget !== false;
+      let k = 0; while (k < bChunk.length && bChunk[k] in rb) k++;
+      let ks = 0; while (ks < sChunk.length && sChunk[ks] in rs) ks++;
+      i += k; si += ks;
+      anStatus(`Localizando compradores: ${intf(Math.min(i, buyers.length))} de ${intf(buyers.length)}…`);
+      if (r.rate_limited || r.transient) { toast('O Mercado Livre não respondeu a tudo agora — parte das localizações fica para a próxima análise', 'warn', 6000); break; }
+      if (!k && !ks) break;
+      await new Promise(res => setTimeout(res, 300)); // a breath between calls: the Auto Sender shares the quota
+    }
+    geoSave(g);
+    return g;
+  }
+  async function anClaims(orders) {
+    let c; try { c = JSON.parse(localStorage.getItem(CLAIM_KEY) || '{}') || {}; } catch { c = {}; }
+    const ids = [...new Set(orders.flatMap(o => o.md || []))].filter(id => !c[id] || c[id].status !== 'closed').slice(0, 120);
+    for (let i = 0; i < ids.length; i += 30) {
+      try {
+        const r = await api('/api/analytics/claims', { method: 'POST', body: { ids: ids.slice(i, i + 30) } });
+        for (const [id, v] of Object.entries(r.claims || {})) if (v) c[id] = v;
+        if (r.rate_limited) break;
+      } catch { break; }
+    }
+    try { localStorage.setItem(CLAIM_KEY, JSON.stringify(c)); } catch { /* ignore */ }
+    return c;
+  }
+
+  // ── classificação e agregação ──
+  // "confirmed" is the order's initial status, even before payment (ML docs) —
+  // only paid / partially refunded orders count as sales
+  const PAID_ST = ['paid', 'partially_refunded'];
+  const CANCEL_ST = ['cancelled', 'pending_cancel', 'invalid'];
+  function anClassify(o) {
+    const pays = o.pay || [];
+    const paid = PAID_ST.includes(o.st);
+    const wasPaid = pays.some(p => ['approved', 'refunded', 'charged_back', 'partially_refunded', 'in_mediation'].includes(p.s));
+    const cancelledAfterPay = CANCEL_ST.includes(o.st) && wasPaid;
+    const claim = (o.md || []).length > 0;
+    const chargeback = pays.some(p => p.s === 'charged_back');
+    const units = (o.it || []).reduce((s, x) => s + (x.q || 1), 0);
+    return {
+      paid, cancelledAfterPay, unpaid: !paid && !cancelledAfterPay, claim, chargeback, units,
+      base: paid || cancelledAfterPay,
+      gross: paid ? Number(o.tot) || 0 : 0,
+      fees: paid ? (o.it || []).reduce((s, x) => s + (x.f || 0) * (x.q || 1), 0) : 0,
+      refunds: paid ? pays.reduce((s, p) => s + (p.r || 0), 0) : 0,
+      problem: cancelledAfterPay || claim || chargeback,
+    };
+  }
+  function anCancelReason(o) {
+    const cx = o.cx || {};
+    const by = { buyer: 'comprador', seller: 'você (vendedor)', mediator: 'Mercado Livre', fraud: 'Mercado Livre (fraude)' }[cx.by] || (cx.by || 'não informado');
+    return { by, why: cx.ds || cx.code || 'sem descrição' };
+  }
+  function anAggregate(orders, g, claims) {
+    const A = { orders: 0, base: 0, paid: 0, gross: 0, fees: 0, refunds: 0, units: 0, cancel: 0, unpaid: 0, claims: 0, chargebacks: 0,
+      problems: 0, located: 0, multiUnit: 0, buyers: new Map(), cancelBy: {}, cancelWhy: {}, claimWhy: {}, byDay: new Map(),
+      byUF: new Map(), byCity: new Map(), byProd: new Map(), heat: Array.from({ length: 7 }, () => new Array(24).fill(0)),
+      lt: { gold_special: { n: 0, gross: 0, fees: 0 }, gold_pro: { n: 0, gross: 0, fees: 0 } }, unknownGeo: { base: 0, gross: 0, paid: 0, problems: 0 } };
+    const bump = (map, key, init) => { let v = map.get(key); if (!v) { v = init(); map.set(key, v); } return v; };
+    const placeInit = () => ({ base: 0, paid: 0, gross: 0, problems: 0, cancel: 0, claims: 0, buyers: new Set() });
+    for (const o of orders) {
+      const c = anClassify(o);
+      A.orders++;
+      if (c.unpaid) { A.unpaid++; continue; }
+      A.base++;
+      const geo = g ? geoOf(o, g) : { s: '', c: '' };
+      if (c.paid) {
+        A.paid++; A.gross += c.gross; A.fees += c.fees; A.refunds += c.refunds; A.units += c.units;
+        if (c.units > 1) A.multiUnit++;
+        const day = brDayOf(o.d);
+        const dd = bump(A.byDay, day, () => ({ gross: 0, n: 0 })); dd.gross += c.gross; dd.n++;
+        A.heat[brWdOf(o.d)][brHourOf(o.d)]++;
+        const it0 = (o.it || [])[0] || {};
+        const lt = A.lt[it0.lt]; if (lt) { lt.n++; lt.gross += c.gross; lt.fees += c.fees; }
+      }
+      if (c.cancelledAfterPay) {
+        A.cancel++;
+        const r = anCancelReason(o);
+        A.cancelBy[r.by] = (A.cancelBy[r.by] || 0) + 1;
+        A.cancelWhy[r.why] = (A.cancelWhy[r.why] || 0) + 1;
+      }
+      if (c.claim) {
+        A.claims++;
+        for (const id of o.md) { const cl = claims && claims[id]; const why = cl ? cl.reason : 'motivo não consultado'; A.claimWhy[why] = (A.claimWhy[why] || 0) + 1; }
+      }
+      if (c.chargeback) A.chargebacks++;
+      if (c.problem) A.problems++;
+      // comprador
+      const bu = bump(A.buyers, o.b || o.n, () => ({ nick: o.n, paid: 0, problems: 0, gross: 0, uf: geo.s }));
+      if (c.paid) { bu.paid++; bu.gross += c.gross; }
+      if (c.problem) bu.problems++;
+      // lugar
+      if (geo.s) {
+        A.located++;
+        for (const [map, key] of [[A.byUF, geo.s], [A.byCity, geo.s + '|' + (geo.c || '?')]]) {
+          const p = bump(map, key, placeInit);
+          p.base++; if (c.paid) { p.paid++; p.gross += c.gross; }
+          if (c.problem) p.problems++; if (c.cancelledAfterPay) p.cancel++; if (c.claim) p.claims++;
+          p.buyers.add(o.b);
+        }
+      } else { A.unknownGeo.base++; A.unknownGeo.gross += c.gross; if (c.paid) A.unknownGeo.paid++; if (c.problem) A.unknownGeo.problems++; }
+      // produto
+      for (const it of (o.it || []).slice(0, 1)) {
+        const p = bump(A.byProd, it.id, () => ({ title: it.t, base: 0, paid: 0, units: 0, gross: 0, fees: 0, problems: 0, premium: 0 }));
+        p.base++; if (c.paid) { p.paid++; p.units += c.units; p.gross += c.gross; p.fees += c.fees; if (it.lt === 'gold_pro') p.premium++; }
+        if (c.problem) p.problems++;
+      }
+    }
+    A.net = A.gross - A.fees - A.refunds;
+    A.ticket = A.paid ? A.gross / A.paid : 0;
+    A.rate = x => A.base ? x / A.base : 0;
+    A.uniqueBuyers = [...A.buyers.values()].filter(b => b.paid > 0).length;
+    A.repeatBuyers = [...A.buyers.values()].filter(b => b.paid > 1).length;
+    return A;
+  }
+
+  // ── filtros (região / estado / cidade) — re-renderiza sem buscar de novo ──
+  function anFilterOrders(orders) {
+    const { uf, region } = state.an;
+    if (!uf && !region) return orders;
+    const g = state.an.geo;
+    return orders.filter(o => {
+      const s = geoOf(o, g).s;
+      if (!s) return false;
+      if (uf) return s === uf;
+      return UF_INFO[s] && UF_INFO[s][1] === region;
+    });
+  }
+
+  // ── execução ──
+  async function anRun(force) {
+    // a click while an analysis runs is not lost: it runs right after, with the latest choice
+    if (state.an.busy) { state.an.pending = force || state.an.pending === 'force' ? 'force' : 'normal'; return; }
+    const per = anPeriod();
+    if (!per || per.from > per.to) { toast('Escolha um período válido', 'warn'); return; }
+    if (per.tooOld) { toast(`A análise cobre até 12 meses para trás (a partir de ${fmtDay(per.minDay)})`, 'warn', 6000); return; }
+    if (per.days > 366) { toast('Período máximo: 1 ano', 'warn'); return; }
+    per.range = state.an.range;
+    state.an.busy = true;
+    const body = $('an-body'); if (body) body.classList.add('an-loading');
+    const btn = $('btn-an-run'); if (btn) btn.disabled = true;
+    try {
+      const key = `${per.from}|${per.to}`;
+      const fresh = c => c && !force && !c.partial && Date.now() - c.at < 30 * 60000;
+      let cur = state.an.cache[key];
+      if (!fresh(cur)) {
+        const r = await anFetchOrders(per.from, per.to, 'Buscando pedidos');
+        if (!r.orders.length && r.partial) {
+          // nothing came back (e.g. Mercado Livre asked for a pause): keep showing the last good analysis
+          toast(r.partial, 'warn', 8000);
+          if (state.an.cur) { anRender(); anStatus(`⚠ ${r.partial} — mostrando a análise anterior.`); }
+          else anStatus('⚠ ' + r.partial);
+          return;
+        }
+        cur = { orders: r.orders, partial: r.partial, at: Date.now() };
+        state.an.cache[key] = cur;
+      }
+      let prev = null;
+      if ($('an-compare')?.checked && per.cmpOk) {
+        const pk = `${per.prevFrom}|${per.prevTo}`;
+        prev = state.an.cache[pk];
+        if (!fresh(prev)) {
+          const r = await anFetchOrders(per.prevFrom, per.prevTo, 'Período anterior');
+          prev = { orders: r.orders, partial: r.partial, at: Date.now() };
+          state.an.cache[pk] = prev;
+        }
+      }
+      if (state.an.pending) return; // another period was chosen meanwhile — it runs next (data stays cached)
+      anStatus('Localizando compradores…');
+      state.an.geo = await anLocate(cur.orders);
+      if (cur.orders.some(o => (o.md || []).length)) { anStatus('Consultando motivos das reclamações…'); state.an.claims = await anClaims(cur.orders); }
+      try { state.an.log = await api('/api/orders'); } catch { state.an.log = []; }
+      Object.assign(state.an, { cur, prev, per });
+      anSaveLast();
+      anRender();
+    } catch (e) { anStatus('Erro: ' + e.message); toast(e.message, 'err'); }
+    finally {
+      state.an.busy = false;
+      if (body) body.classList.remove('an-loading');
+      if (btn) btn.disabled = false;
+      if (state.an.pending) { const f = state.an.pending === 'force'; state.an.pending = null; setTimeout(() => anRun(f), 0); }
+    }
+  }
+  // The last analysis is kept in this browser (opens instantly next time). It
+  // shares the ~5 MB storage with the draft of "Criar Anúncio" and the location
+  // cache, so it stays small: without the previous period if needed, or not at all.
+  function anSaveLast() {
+    const { cur, prev, per } = state.an;
+    const put = obj => {
+      try { const t = JSON.stringify(obj); if (t.length > 1200000) return false; localStorage.setItem(AN_LAST_KEY, t); return true; }
+      catch { return false; }
+    };
+    const range = per?.range || state.an.range;
+    if (put({ per, range, cur, prev }) || put({ per, range, cur, prev: null })) return;
+    try { localStorage.removeItem(AN_LAST_KEY); } catch { /* ignore */ }
+  }
+  function anRestore() {
+    try {
+      const d = JSON.parse(localStorage.getItem(AN_LAST_KEY) || 'null');
+      if (!d || !d.cur || !d.per) return null;
+      state.an.range = d.range || '30';
+      if (state.an.range === 'custom') { if ($('an-from')) $('an-from').value = d.per.from; if ($('an-to')) $('an-to').value = d.per.to; }
+      Object.assign(state.an, { cur: d.cur, prev: d.prev, per: d.per, geo: geoLoad() });
+      try { state.an.claims = JSON.parse(localStorage.getItem(CLAIM_KEY) || '{}') || {}; } catch { /* ignore */ }
+      state.an.cache[`${d.per.from}|${d.per.to}`] = d.cur;
+      if (d.prev) state.an.cache[`${d.per.prevFrom}|${d.per.prevTo}`] = d.prev;
+      return d.cur;
+    } catch { return null; }
+  }
+
+  function initStats() {
+    renderStats();
+    anSyncFilterUI();
+    if (!state.an.cur) {
+      const last = anRestore();
+      anSyncFilterUI();
+      if (last) anRender();
+      if (!last || last.partial || Date.now() - last.at > 30 * 60000) anRun(false);
+    } else anRender();
+  }
+
+  function anSyncFilterUI() {
+    $$('[data-an-range]').forEach(b => b.classList.toggle('active', b.dataset.anRange === state.an.range));
+    $('an-custom')?.classList.toggle('hidden', state.an.range !== 'custom');
+    const reg = $('an-region'), ufSel = $('an-uf');
+    if (reg && !reg.options.length) {
+      reg.appendChild(el('option', { value: '' }, 'Todas as regiões'));
+      REGIONS.forEach(r => reg.appendChild(el('option', { value: r }, r)));
+    }
+    if (reg) reg.value = state.an.region;
+    if (ufSel) {
+      ufSel.innerHTML = '';
+      ufSel.appendChild(el('option', { value: '' }, state.an.region ? `Todos (${state.an.region})` : 'Todos os estados'));
+      Object.entries(UF_INFO).filter(([, v]) => !state.an.region || v[1] === state.an.region)
+        .sort((a, b) => a[1][0].localeCompare(b[1][0], 'pt-BR'))
+        .forEach(([k, v]) => ufSel.appendChild(el('option', { value: k }, `${v[0]} (${k})`)));
+      ufSel.value = state.an.uf;
+    }
+  }
+
+  function wireAnalyticsHandlers() {
+    $$('[data-an-range]').forEach(b => b.addEventListener('click', () => {
+      state.an.range = b.dataset.anRange;
+      anSyncFilterUI();
+      if (state.an.range === 'custom') {
+        // escolhe as duas datas e clica em "Aplicar"
+        const today = brDayOf(Date.now());
+        for (const id of ['an-from', 'an-to']) { const i = $(id); if (i) { i.max = today; i.min = addDays(today, -AN_MAX_BACK); } }
+        if ($('an-from') && !$('an-from').value) $('an-from').value = addDays(today, -29);
+        if ($('an-to') && !$('an-to').value) $('an-to').value = today;
+        $('an-from')?.focus();
+        return;
+      }
+      anRun(false);
+    }));
+    bind('btn-an-apply', 'click', () => anRun(false));
+    bind('btn-an-run', 'click', () => anRun(true));
+    bind('an-compare', 'change', () => anRun(false));
+    bind('an-region', 'change', e => { state.an.region = e.target.value; state.an.uf = ''; anSyncFilterUI(); anRender(); });
+    bind('an-uf', 'change', e => { state.an.uf = e.target.value; anRender(); });
+    bind('an-city-search', 'input', () => { clearTimeout(state.an.searchT); state.an.searchT = setTimeout(() => anRenderGeoTable(state.an.A), 250); });
+    bind('btn-an-csv', 'click', anExportCSV);
+    bind('btn-an-clear-filter', 'click', () => { state.an.uf = ''; state.an.region = ''; anSyncFilterUI(); anRender(); });
+    let rt;
+    window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (state.currentScreen === 'estatisticas' && state.an.A) anRenderRevenue(state.an.A); }, 200); });
+  }
+
+  // ── renderização ──
+  function anRender() {
+    const s = state.an;
+    if (!s.cur) return;
+    const slice = anFilterOrders(s.cur.orders);
+    const A = anAggregate(slice, s.geo, s.claims);
+    const filtered = !!(s.uf || s.region);
+    // Comparison: never against incomplete data, and when the period ends
+    // today, the previous one is cut at the same point of its last day
+    // (comparing 15 hours of today with 24 hours of a past day reads as a fall).
+    s.cmp = { why: '', cutAt: null };
+    let P = null;
+    if (s.prev && !filtered) {
+      if (s.prev.partial || s.cur.partial) s.cmp.why = 'Sem comparação: um dos períodos veio incompleto (o Mercado Livre pediu uma pausa) — clique em Atualizar.';
+      else {
+        let prevOrders = s.prev.orders;
+        if (s.per.to === brDayOf(s.cur.at)) {
+          const elapsed = s.cur.at - Date.parse(`${s.per.from}T00:00:00-03:00`);
+          const limit = Date.parse(`${s.per.prevFrom}T00:00:00-03:00`) + elapsed;
+          prevOrders = prevOrders.filter(o => o.d <= limit);
+          s.cmp.cutAt = s.cur.at;
+        }
+        P = anAggregate(prevOrders, null, null);
+      }
+    }
+    s.A = A; s.P = P;
+    $('an-empty')?.classList.toggle('hidden', A.orders > 0);
+    $('an-results')?.classList.toggle('hidden', A.orders === 0);
+    const fl = $('an-filter-label');
+    if (fl) {
+      fl.textContent = filtered ? `Mostrando: ${s.uf ? UF_INFO[s.uf][0] : s.region} · pedidos sem localização ficam de fora` : '';
+      $('btn-an-clear-filter')?.classList.toggle('hidden', !filtered);
+    }
+    anStatus(`${intf(s.cur.orders.length)} pedido(s) de ${fmtDay(s.per.from)} a ${fmtDay(s.per.to)} · dados de ${brDateTime(s.cur.at).slice(0, 5)}, ${brDateTime(s.cur.at).slice(11)}${s.cur.partial ? ' · ⚠ parcial: ' + s.cur.partial : ''}${s.prev?.partial ? ' · ⚠ período anterior incompleto' : ''}`);
+    if (!A.orders) return;
+    anRenderKPIs(A, P);
+    anRenderRevenue(A);
+    anRenderMap(A);
+    anRenderTopUF(A);
+    anRenderGeoTable(A);
+    anRenderProblems(A);
+    anRenderProducts(A);
+    anRenderHeat(A);
+    anRenderTips(anTips(A, P));
+  }
+
+  function anDelta(cur, prev, upIsGood = true, asPoints = false) {
+    if (prev === null || prev === undefined || !Number.isFinite(prev)) return null;
+    let d, txt;
+    if (asPoints) { d = cur - prev; txt = `${d >= 0 ? '+' : '−'}${Math.abs(d * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} p.p.`; }
+    else { if (!prev) return null; d = (cur - prev) / prev; txt = `${d >= 0 ? '+' : '−'}${pctf(Math.abs(d), 0)}`; }
+    if (Math.abs(d) < 0.0005) return { txt: 'igual', cls: 'flat', icon: '=' };
+    const good = (d > 0) === upIsGood;
+    return { txt, cls: good ? 'up-good' : 'down-bad', icon: d > 0 ? '▲' : '▼' };
+  }
+
+  function anRenderKPIs(A, P) {
+    const box = $('an-kpis'); if (!box) return;
+    box.innerHTML = '';
+    const cancelRate = A.rate(A.cancel), claimRate = A.rate(A.claims);
+    const tiles = [
+      { label: 'Faturamento bruto', value: brl(A.gross), delta: P && anDelta(A.gross, P.gross), hero: true, sub: `${intf(A.paid)} pedido(s) pago(s)` },
+      { label: 'Líquido estimado', value: brl(A.net), delta: P && anDelta(A.net, P.net), sub: `tarifas ${brl(A.fees)}${A.refunds ? ` · estornos ${brl(A.refunds)}` : ''}` },
+      { label: 'Ticket médio', value: brl(A.ticket), delta: P && anDelta(A.ticket, P.ticket), sub: `${intf(A.units)} unidade(s)` },
+      { label: 'Compradores', value: intf(A.uniqueBuyers), delta: P && anDelta(A.uniqueBuyers, P.uniqueBuyers), sub: A.uniqueBuyers ? `${pctf(A.repeatBuyers / A.uniqueBuyers, 0)} compraram mais de 1 vez` : '' },
+      { label: 'Cancelados após pagar', value: `${intf(A.cancel)} · ${pctf(cancelRate)}`, delta: P && anDelta(cancelRate, P.rate(P.cancel), false, true), sub: A.unpaid ? `${intf(A.unpaid)} não pago(s) (Pix/boleto)` : 'sem pedidos não pagos' },
+      { label: 'Reclamações', value: `${intf(A.claims)} · ${pctf(claimRate)}`, delta: P && anDelta(claimRate, P.rate(P.claims), false, true), sub: A.chargebacks ? `${intf(A.chargebacks)} contestação(ões) no cartão` : 'das vendas pagas' },
+    ];
+    for (const t of tiles) {
+      const tile = el('div', { class: 'an-kpi' + (t.hero ? ' hero' : '') });
+      tile.append(el('div', { class: 'an-kpi-label' }, t.label), el('div', { class: 'an-kpi-value' }, t.value));
+      const meta = el('div', { class: 'an-kpi-meta' });
+      if (t.delta) meta.appendChild(el('span', { class: `an-delta ${t.delta.cls}` }, `${t.delta.icon} ${t.delta.txt}`));
+      if (t.sub) meta.appendChild(el('span', { class: 'muted' }, (t.delta ? ' · ' : '') + t.sub));
+      tile.appendChild(meta);
+      box.appendChild(tile);
+    }
+    const note = $('an-kpi-note');
+    const per = state.an.per, cmp = state.an.cmp || {};
+    const why = state.an.uf || state.an.region ? ' A comparação com o período anterior só aparece sem filtro de região.'
+      : cmp.why ? ' ' + cmp.why
+      : !per.cmpOk && $('an-compare')?.checked ? ' Sem comparação: o período anterior passaria de 12 meses atrás.' : '';
+    const cmpTxt = P ? `▲▼ = comparação com ${fmtDay(per.prevFrom)}–${fmtDay(per.prevTo)}${cmp.cutAt ? `, com o último dia contado só até as ${brDateTime(cmp.cutAt).slice(11)} (o mesmo horário de hoje)` : ''}. ` : '';
+    if (note) note.textContent = cmpTxt + 'Líquido = bruto − tarifas do ML − estornos; não inclui impostos.' + why;
+  }
+
+  // tooltip único (valor primeiro, rótulo depois), em hover e foco
+  function anTipEl() {
+    let t = $('an-tip');
+    if (!t) { t = el('div', { id: 'an-tip', class: 'an-tip', role: 'tooltip' }); t.hidden = true; document.body.appendChild(t); }
+    return t;
+  }
+  function anTip(node, rowsFn) {
+    const place = (x, y) => {
+      const t = anTipEl();
+      const w = t.offsetWidth || 180, h = t.offsetHeight || 60;
+      t.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, x + 14)) + 'px';
+      t.style.top = Math.max(8, Math.min(window.innerHeight - h - 8, y - h - 10)) + 'px';
+    };
+    const show = (x, y) => {
+      const t = anTipEl(); t.innerHTML = '';
+      const rows = rowsFn();
+      t.appendChild(el('strong', {}, rows[0]));
+      rows.slice(1).forEach(r => t.appendChild(el('div', {}, r)));
+      t.hidden = false; place(x, y);
+    };
+    node.addEventListener('pointerenter', e => show(e.clientX, e.clientY));
+    node.addEventListener('pointermove', e => place(e.clientX, e.clientY));
+    node.addEventListener('pointerleave', () => { anTipEl().hidden = true; });
+    node.addEventListener('focus', () => { const r = node.getBoundingClientRect(); show(r.left + r.width / 2, r.top); });
+    node.addEventListener('blur', () => { anTipEl().hidden = true; });
+  }
+
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    const e = Math.pow(10, Math.floor(Math.log10(v))), f = v / e;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e;
+  }
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const svgEl = (tag, attrs = {}, text) => { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; };
+
+  function anBuckets(A) {
+    const { from, to, days } = state.an.per;
+    const mode = days <= 62 ? 'day' : days <= 200 ? 'week' : 'month';
+    const keyOf = d => mode === 'day' ? d : mode === 'month' ? d.slice(0, 7) : (() => { const t = Date.parse(d + 'T12:00:00Z'); const wd = (new Date(t).getUTCDay() + 6) % 7; return addDays(d, -wd); })();
+    const out = new Map();
+    for (let d = from; d <= to; d = addDays(d, 1)) { const k = keyOf(d); if (!out.has(k)) out.set(k, { key: k, gross: 0, n: 0 }); }
+    for (const [d, v] of A.byDay) { const b = out.get(keyOf(d)); if (b) { b.gross += v.gross; b.n += v.n; } }
+    const label = k => mode === 'day' ? fmtDay(k).slice(0, 5) : mode === 'month' ? k.split('-').reverse().join('/') : 'sem. ' + fmtDay(k).slice(0, 5);
+    return { mode, rows: [...out.values()].map(r => ({ ...r, label: label(r.key) })) };
+  }
+
+  function anRenderRevenue(A) {
+    const box = $('an-rev-chart'); if (!box) return;
+    const { mode, rows } = anBuckets(A);
+    const title = $('an-rev-title');
+    if (title) title.textContent = { day: 'Faturamento por dia', week: 'Faturamento por semana', month: 'Faturamento por mês' }[mode];
+    box.innerHTML = '';
+    const W = Math.max(280, box.clientWidth || 640), H = 230, pad = { l: 58, r: 10, t: 22, b: 28 };
+    const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+    const max = niceMax(Math.max(0, ...rows.map(r => r.gross)));
+    const svg = svgEl('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, class: 'an-svg', role: 'img', 'aria-label': (title?.textContent || 'Faturamento') + ' no período' });
+    for (const f of [0, 0.5, 1]) {
+      const y = pad.t + ch - f * ch;
+      svg.appendChild(svgEl('line', { x1: pad.l, x2: W - pad.r, y1: y, y2: y, class: f === 0 ? 'an-axis' : 'an-grid' }));
+      svg.appendChild(svgEl('text', { x: pad.l - 8, y: y + 4, 'text-anchor': 'end', class: 'an-tick' }, brlShort(max * f)));
+    }
+    const n = rows.length, band = cw / Math.max(1, n), bw = Math.max(2, Math.min(24, band - 2));
+    const every = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(cw / 56))));
+    let maxI = -1; rows.forEach((r, i) => { if (r.gross > 0 && (maxI < 0 || r.gross > rows[maxI].gross)) maxI = i; });
+    rows.forEach((r, i) => {
+      const x = pad.l + i * band + (band - bw) / 2;
+      const h = r.gross > 0 ? Math.max(2, r.gross / max * ch) : 0;
+      const y = pad.t + ch - h;
+      if (h > 0) {
+        const rr = Math.min(4, bw / 2, h);
+        svg.appendChild(svgEl('path', { class: 'an-bar', d: `M${x},${y + h}V${y + rr}Q${x},${y} ${x + rr},${y}H${x + bw - rr}Q${x + bw},${y} ${x + bw},${y + rr}V${y + h}Z` }));
+      }
+      const hit = svgEl('rect', { x: pad.l + i * band, y: pad.t, width: band, height: ch, class: 'an-hit', tabindex: '0' });
+      anTip(hit, () => [brl(r.gross), `${r.label} · ${intf(r.n)} pedido(s)`]);
+      svg.appendChild(hit);
+      if (i % every === 0) svg.appendChild(svgEl('text', { x: pad.l + i * band + band / 2, y: H - 8, 'text-anchor': 'middle', class: 'an-tick' }, r.label));
+      if (i === maxI && n > 1) svg.appendChild(svgEl('text', { x: Math.min(W - pad.r - 4, Math.max(pad.l + 30, x + bw / 2)), y: y - 6, 'text-anchor': 'middle', class: 'an-label' }, brlShort(r.gross)));
+    });
+    box.appendChild(svg);
+  }
+
+  function anBin(v, max) { return v > 0 && max > 0 ? Math.min(5, Math.max(1, Math.ceil(Math.sqrt(v / max) * 5))) : 0; }
+  function anLegend(text) {
+    const lg = el('div', { class: 'an-legend' });
+    lg.appendChild(el('span', { class: 'muted small' }, text[0]));
+    for (let b = 1; b <= 5; b++) lg.appendChild(el('span', { class: `an-sw b${b}` }));
+    lg.appendChild(el('span', { class: 'muted small' }, text[1]));
+    return lg;
+  }
+
+  function anRenderMap(A) {
+    const box = $('an-map'); if (!box) return;
+    box.innerHTML = '';
+    const max = Math.max(0, ...[...A.byUF.values()].map(v => v.gross));
+    const grid = el('div', { class: 'an-tiles' });
+    for (const [uf, [c, r]] of Object.entries(TILE_POS)) {
+      const d = A.byUF.get(uf), v = d ? d.gross : 0;
+      const t = el('button', { class: `an-tile b${anBin(v, max)}${state.an.uf === uf ? ' sel' : ''}`, style: `grid-column:${c + 1};grid-row:${r + 1}`, 'aria-label': `${UF_INFO[uf][0]}: ${brl(v)}` });
+      t.append(el('span', { class: 'an-tile-uf' }, uf), el('span', { class: 'an-tile-v' }, v ? (v / A.gross < 0.005 ? '<1%' : pctf(v / A.gross, 0)) : ''));
+      anTip(t, () => d ? [brl(d.gross), `${UF_INFO[uf][0]} · ${pctf(d.gross / (A.gross || 1))} do faturamento`, `${intf(d.paid)} pedido(s) · ${intf(d.buyers.size)} comprador(es)`,
+        d.problems ? `${intf(d.problems)} com problema (${pctf(d.problems / d.base)})` : 'nenhum problema'] : ['Sem vendas', UF_INFO[uf][0]]);
+      t.addEventListener('click', () => { state.an.region = ''; state.an.uf = state.an.uf === uf ? '' : uf; anSyncFilterUI(); anRender(); });
+      grid.appendChild(t);
+    }
+    box.append(grid, anLegend(['menos', 'mais faturamento']));
+    box.appendChild(el('div', { class: 'muted small', style: 'margin-top:6px' }, 'Mapa esquemático: cada quadrado é um estado. Clique para filtrar.'));
+  }
+
+  function anRenderTopUF(A) {
+    const box = $('an-uf-bars'); if (!box) return;
+    box.innerHTML = '';
+    const rows = [...A.byUF.entries()].sort((a, b) => b[1].gross - a[1].gross).slice(0, 10);
+    if (!rows.length) { box.appendChild(el('div', { class: 'muted small' }, 'Sem localização conhecida para estes pedidos.')); return; }
+    const max = rows[0][1].gross || 1;
+    box.appendChild(el('div', { class: 'an-sub' }, 'Estados que mais faturam'));
+    for (const [uf, d] of rows) {
+      const row = el('div', { class: 'an-hbar', tabindex: '0' });
+      const track = el('div', { class: 'an-hbar-track' }, el('div', { class: 'an-hbar-fill', style: `width:${Math.max(1, d.gross / max * 100)}%` }));
+      row.append(el('span', { class: 'an-hbar-label' }, UF_INFO[uf][0]), track, el('span', { class: 'an-hbar-val' }, `${brlShort(d.gross)} · ${pctf(d.gross / (A.gross || 1), 0)}`));
+      anTip(row, () => [brl(d.gross), `${UF_INFO[uf][0]} · ${intf(d.paid)} pedido(s)`, `ticket ${brl(d.paid ? d.gross / d.paid : 0)}`]);
+      row.addEventListener('click', () => { state.an.region = ''; state.an.uf = uf; anSyncFilterUI(); anRender(); });
+      box.appendChild(row);
+    }
+    const cov = A.base ? A.located / A.base : 0;
+    box.appendChild(el('div', { class: 'muted small', style: 'margin-top:8px' },
+      `Localização conhecida em ${pctf(cov, 0)} dos pedidos (cidade do cadastro do comprador; em pedidos com envio, o endereço de entrega).`));
+  }
+
+  function anTable(head, rows, opts = {}) {
+    const t = el('table', { class: 'table an-table' });
+    const tr = el('tr'); head.forEach((h, i) => tr.appendChild(el('th', { class: i && opts.num !== false ? 'num' : '' }, h)));
+    t.appendChild(el('thead', {}, tr));
+    const tb = el('tbody');
+    if (!rows.length) { const r = el('tr'); r.appendChild(el('td', { colspan: String(head.length), class: 'muted small' }, opts.empty || 'Nada para mostrar.')); tb.appendChild(r); }
+    rows.forEach(cells => { const r = el('tr'); cells.forEach((c, i) => r.appendChild(el('td', { class: i && opts.num !== false ? 'num' : '' }, c))); tb.appendChild(r); });
+    t.appendChild(tb);
+    return el('div', { class: 'table-wrap' }, t);
+  }
+
+  function anRenderGeoTable(A) {
+    const box = $('an-geo-table'); if (!box || !A) return;
+    box.innerHTML = '';
+    const q = fold($('an-city-search')?.value || '');
+    const total = A.gross || 1;
+    const fmtRow = (name, d, extra) => [name, intf(d.paid), brl(d.gross), pctf(d.gross / total), brl(d.paid ? d.gross / d.paid : 0),
+      d.problems ? `${intf(d.problems)} (${pctf(d.problems / d.base)})` : '—', ...extra];
+    let head, rows;
+    if (q || state.an.uf) {
+      head = ['Cidade', 'Pedidos', 'Faturamento', '% do total', 'Ticket médio', 'Problemas'];
+      rows = [...A.byCity.entries()]
+        .filter(([k]) => { const [uf, city] = k.split('|'); return (!state.an.uf || uf === state.an.uf) && (!q || fold(city).includes(q) || fold(UF_INFO[uf]?.[0]).includes(q) || fold(uf) === q); })
+        .sort((a, b) => b[1].gross - a[1].gross).slice(0, 100)
+        .map(([k, d]) => { const [uf, city] = k.split('|'); return fmtRow(`${city === '?' ? 'Cidade não informada' : city} — ${uf}`, d, []); });
+    } else {
+      head = ['Estado', 'Pedidos', 'Faturamento', '% do total', 'Ticket médio', 'Problemas', 'Vendas por milhão de hab.'];
+      rows = [...A.byUF.entries()].sort((a, b) => b[1].gross - a[1].gross)
+        .map(([uf, d]) => fmtRow(`${UF_INFO[uf][0]} (${uf})`, d, [(d.paid / UF_INFO[uf][2]).toLocaleString('pt-BR', { maximumFractionDigits: 1 })]));
+      if (A.unknownGeo.base) rows.push(fmtRow('Sem localização', { ...A.unknownGeo }, ['—']));
+    }
+    box.appendChild(anTable(head, rows, { empty: 'Nenhuma cidade encontrada.' }));
+  }
+
+  function anRenderProblems(A) {
+    const box = $('an-problems'); if (!box) return;
+    box.innerHTML = '';
+    const avg = A.rate(A.problems);
+    const ufRows = [...A.byUF.entries()].filter(([, d]) => d.base >= 5 && d.problems > 0)
+      .sort((a, b) => b[1].problems / b[1].base - a[1].problems / a[1].base).slice(0, 8)
+      .map(([uf, d]) => { const r = d.problems / d.base; return [`${UF_INFO[uf][0]} (${uf})`, intf(d.base), intf(d.cancel), intf(d.claims), pctf(r), avg ? `${(r / avg).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}×` : '—']; });
+    box.appendChild(el('div', { class: 'an-sub' }, `Taxa geral de problemas: ${pctf(avg)} (${intf(A.problems)} de ${intf(A.base)} vendas pagas)`));
+    box.appendChild(anTable(['Estado', 'Vendas', 'Cancelados', 'Reclamações', 'Taxa', 'vs. média'], ufRows, { empty: 'Nenhum estado com 5+ vendas teve problemas. 🎉' }));
+    const lists = el('div', { class: 'an-two' });
+    const reasonList = (title, obj) => {
+      const b = el('div');
+      b.appendChild(el('div', { class: 'an-sub' }, title));
+      const entries = Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      if (!entries.length) b.appendChild(el('div', { class: 'muted small' }, 'Nenhum.'));
+      entries.forEach(([k, v]) => b.appendChild(el('div', { class: 'an-reason' }, el('span', {}, k), el('strong', {}, intf(v)))));
+      return b;
+    };
+    lists.append(reasonList('Motivos das reclamações', A.claimWhy), reasonList('Quem cancelou (após pagar)', A.cancelBy));
+    box.appendChild(lists);
+    const bad = [...A.buyers.values()].filter(b => b.problems >= 2).sort((a, b) => b.problems - a.problems).slice(0, 10);
+    if (bad.length) {
+      box.appendChild(el('div', { class: 'an-sub', style: 'margin-top:12px' }, 'Compradores com mais de um problema'));
+      box.appendChild(anTable(['Comprador', 'Problemas', 'Compras pagas', 'Estado'], bad.map(b => [b.nick || '—', intf(b.problems), intf(b.paid), b.uf || '—'])));
+    }
+  }
+
+  function anRenderProducts(A) {
+    const box = $('an-products'); if (!box) return;
+    box.innerHTML = '';
+    const rows = [...A.byProd.entries()].sort((a, b) => b[1].gross - a[1].gross).slice(0, 40).map(([id, d]) => [
+      `${d.title || id} (${id})`, intf(d.paid), intf(d.units), brl(d.gross), pctf(d.gross / (A.gross || 1)), brl(d.paid ? d.gross / d.paid : 0),
+      d.paid ? pctf(d.premium / d.paid, 0) : '—', d.problems ? `${intf(d.problems)} (${pctf(d.problems / d.base)})` : '—']);
+    box.appendChild(anTable(['Anúncio', 'Pedidos', 'Unidades', 'Faturamento', '% do total', 'Ticket', 'Premium', 'Problemas'], rows));
+  }
+
+  function anRenderHeat(A) {
+    const box = $('an-heat'); if (!box) return;
+    box.innerHTML = '';
+    const max = Math.max(0, ...A.heat.flat());
+    const grid = el('div', { class: 'an-heat' });
+    grid.appendChild(el('span'));
+    for (let h = 0; h < 24; h++) grid.appendChild(el('span', { class: 'an-heat-h' }, h % 3 === 0 ? String(h).padStart(2, '0') : ''));
+    A.heat.forEach((row, wd) => {
+      grid.appendChild(el('span', { class: 'an-heat-d' }, WEEKDAYS[wd]));
+      row.forEach((v, h) => {
+        const c = el('span', { class: `an-cell b${anBin(v, max)}`, tabindex: v ? '0' : '-1' });
+        anTip(c, () => [`${intf(v)} pedido(s)`, `${WEEKDAYS[wd]} · ${String(h).padStart(2, '0')}h–${String(h + 1).padStart(2, '0')}h`]);
+        grid.appendChild(c);
+      });
+    });
+    box.append(grid, anLegend(['menos', 'mais pedidos']));
+  }
+
+  // ── dicas e pontos de atenção (regras sobre os números do período) ──
+  function anTips(A, P) {
+    const tips = [];
+    const add = (level, title, detail) => tips.push({ level, title, detail });
+    const s = state.an;
+    // tendência
+    if (P && P.gross > 0) {
+      const ch = (A.gross - P.gross) / P.gross;
+      if (ch <= -0.15) {
+        const drops = [...P.byProd.entries()].map(([id, p]) => ({ id, t: p.title, d: (A.byProd.get(id)?.gross || 0) - p.gross })).sort((a, b) => a.d - b.d).filter(x => x.d < 0).slice(0, 2);
+        add('serious', `Faturamento caiu ${pctf(-ch, 0)} em relação a ${fmtDay(s.per.prevFrom)}–${fmtDay(s.per.prevTo)}`,
+          `De ${brl(P.gross)} para ${brl(A.gross)}.${drops.length ? ` Maiores quedas: ${drops.map(x => `${x.t || x.id} (−${brl(-x.d)})`).join('; ')}.` : ''} Confira se esses anúncios estão ativos, com estoque e com preço competitivo.`);
+      } else if (ch >= 0.15) add('good', `Faturamento cresceu ${pctf(ch, 0)} em relação a ${fmtDay(s.per.prevFrom)}–${fmtDay(s.per.prevTo)}`, `De ${brl(P.gross)} para ${brl(A.gross)}. Garanta estoque de chaves para acompanhar o ritmo.`);
+    }
+    // dependência de um produto
+    const prods = [...A.byProd.values()].sort((a, b) => b.gross - a.gross);
+    if (prods.length && A.gross > 0 && prods[0].gross / A.gross >= 0.6 && A.paid >= 10)
+      add('warning', `${pctf(prods[0].gross / A.gross, 0)} do faturamento vem de um só anúncio`, `"${prods[0].title}". Se ele for pausado, ficar sem estoque ou um concorrente baixar o preço, o faturamento cai junto. Vale fortalecer um segundo produto.`);
+    // reclamações
+    const claimRate = A.rate(A.claims);
+    const topReasons = Object.entries(A.claimWhy).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k, v]) => `${k} (${v})`).join(', ');
+    const claimProds = [...A.byProd.values()].filter(p => p.problems > 0).sort((a, b) => b.problems - a.problems).slice(0, 2).map(p => p.title).join('; ');
+    if (A.claims >= 2 && claimRate >= 0.02) add('critical', `Reclamações em ${pctf(claimRate)} das vendas`, `${intf(A.claims)} no período${topReasons ? ` — motivos: ${topReasons}` : ''}.${claimProds ? ` Anúncios mais afetados: ${claimProds}.` : ''} Reclamações pesam na reputação: revise as instruções de entrega/ativação desses anúncios e responda rápido no chat.`);
+    else if (A.claims >= 1) add('warning', `${intf(A.claims)} reclamação(ões) no período (${pctf(claimRate)})`, `${topReasons ? `Motivo: ${topReasons}. ` : ''}Acompanhe na tabela de problemas abaixo.`);
+    else if (A.base >= 20) add('good', 'Nenhuma reclamação no período', `${intf(A.base)} vendas pagas sem reclamação.`);
+    // cancelamentos
+    const sellerCancels = A.cancelBy['você (vendedor)'] || 0;
+    if (sellerCancels) add('serious', `${intf(sellerCancels)} venda(s) cancelada(s) por você`, 'Cancelamentos feitos pelo vendedor contam contra a reputação. A causa mais comum é vender sem estoque — mantenha o estoque de chaves acima do aviso de "poucas chaves".');
+    const buyerCancels = A.cancelBy['comprador'] || 0;
+    if (A.base >= 10 && buyerCancels / A.base >= 0.05) add('warning', `${pctf(buyerCancels / A.base)} dos compradores cancelaram depois de pagar`, 'Pode indicar dúvida sobre o produto ou sensação de demora. Deixe claro no anúncio que a entrega é pelo chat logo após a compra, e confira se a 1ª mensagem está saindo em segundos.');
+    if (A.chargebacks) add('critical', `${intf(A.chargebacks)} contestação(ões) de cartão`, 'Compradores contestaram a compra no cartão — é um sinal comum de golpe. Veja os compradores na tabela de problemas e considere bloqueá-los no Mercado Livre.');
+    // compradores recorrentes com problema
+    const bad = [...A.buyers.values()].filter(b => b.problems >= 2);
+    if (bad.length) add('serious', `${intf(bad.length)} comprador(es) com mais de um problema`, `Ex.: ${bad[0].nick} (${bad[0].problems}). O Mercado Livre permite bloquear compradores para impedir novas compras.`);
+    // estados acima da média
+    const avg = A.rate(A.problems);
+    for (const [uf, d] of [...A.byUF.entries()].sort((a, b) => b[1].problems - a[1].problems)) {
+      const r = d.base ? d.problems / d.base : 0;
+      if (d.base >= 8 && d.problems >= 2 && r >= Math.max(2 * avg, 0.05)) {
+        add('warning', `${UF_INFO[uf][0]}: ${pctf(r)} das vendas com problema (média ${pctf(avg)})`, 'Veja se são os mesmos compradores ou o mesmo motivo — padrão repetido numa região pode ser golpe organizado. Os números estão em "Onde há mais problemas".');
+        if (tips.length > 10) break;
+      }
+    }
+    // horários
+    let best = null;
+    for (let wd = 0; wd < 7; wd++) for (let h = 0; h < 24; h++) {
+      const v = A.heat[wd][h] + A.heat[wd][(h + 1) % 24] + A.heat[wd][(h + 2) % 24];
+      if (!best || v > best.v) best = { wd, h, v };
+    }
+    const byWd = A.heat.map(r => r.reduce((a, b) => a + b, 0));
+    if (best && A.paid >= 15) {
+      const weak = byWd.indexOf(Math.min(...byWd));
+      add('info', `Pico de vendas: ${WEEKDAYS[best.wd]}, das ${String(best.h).padStart(2, '0')}h às ${String((best.h + 3) % 24).padStart(2, '0')}h`,
+        `${intf(best.v)} pedidos nessa janela. Mantenha estoque de chaves alto e o envio automático ligado nesse horário. Dia mais fraco: ${WEEKDAYS[weak]} (${intf(byWd[weak])} pedidos) — bom momento para manutenção e ajustes de anúncios.`);
+    }
+    // recompra
+    if (A.uniqueBuyers >= 20) {
+      const rr = A.repeatBuyers / A.uniqueBuyers;
+      if (rr >= 0.1) add('good', `${pctf(rr, 0)} dos compradores voltaram a comprar`, 'Clientes recorrentes: use o Broadcast para avisar sobre renovações ou novas versões (com moderação, para não parecer spam).');
+    }
+    // várias unidades
+    if (A.paid >= 20 && A.multiUnit / A.paid >= 0.08) add('info', `${pctf(A.multiUnit / A.paid, 0)} dos pedidos têm mais de 1 unidade`, 'Considere o recurso "Preços por quantidade" do Mercado Livre (desconto progressivo) ou kits com 2+ licenças.');
+    // Clássico x Premium
+    const c = A.lt.gold_special, pr = A.lt.gold_pro;
+    if (c.n && pr.n) add('info', `Premium: ${pctf(pr.n / (c.n + pr.n), 0)} das vendas`, `Tarifa média: Clássico ${pctf(c.gross ? c.fees / c.gross : 0)} · Premium ${pctf(pr.gross ? pr.fees / pr.gross : 0)}. Compare com o ticket e decida em qual formato vale investir.`);
+    else if (c.n >= 20 && !pr.n) add('info', 'Todas as vendas foram em anúncios Clássicos', 'Um anúncio Premium do mesmo produto (parcelado sem juros, mais exposição) pode atrair outro público. Em Criar Anúncio dá para publicar Clássico + Premium de uma vez — acompanhe aqui se compensa a tarifa maior.');
+    // regiões sub-representadas
+    if (A.located >= 30 && !s.uf && !s.region) {
+      for (const reg of ['Nordeste', 'Norte', 'Sul', 'Centro-Oeste']) {
+        const popShare = Object.values(UF_INFO).filter(v => v[1] === reg).reduce((t, v) => t + v[2], 0) / POP_TOTAL;
+        const sales = [...A.byUF.entries()].filter(([uf]) => UF_INFO[uf][1] === reg).reduce((t, [, d]) => t + d.paid, 0);
+        const located = [...A.byUF.values()].reduce((t, d) => t + d.paid, 0) || 1;
+        if (popShare >= 0.07 && sales / located <= popShare * 0.5) {
+          add('info', `${reg}: ${pctf(popShare, 0)} da população, ${pctf(sales / located, 0)} das suas vendas`, 'É um ponto a analisar, não necessariamente um problema. Em produto físico a causa costuma ser o frete; em digital, alcance dos anúncios e divulgação.');
+          break;
+        }
+      }
+    }
+    // cobertura da localização
+    if (A.base >= 10 && A.located / A.base < 0.6) add('info', `Localização conhecida em só ${pctf(A.located / A.base, 0)} dos pedidos`, 'O Mercado Livre só informa a cidade do cadastro de parte dos compradores; os números por região valem para essa parte.');
+    // envio automático no período
+    const inRange = (s.log || []).filter(o => o.created_at && brDayOf(Date.parse(o.created_at)) >= s.per.from && brDayOf(Date.parse(o.created_at)) <= s.per.to);
+    const noKey = inRange.filter(o => o.skipped === 'no_key').length;
+    if (noKey) add('critical', `${intf(noKey)} venda(s) ficaram sem chave no estoque`, 'Esses compradores não receberam a chave automaticamente. Reponha o estoque em Chaves e atenda esses pedidos manualmente.');
+    const timed = inRange.filter(o => Number(o.first_msg_ms) > 0);
+    if (timed.length >= 5) {
+      const avgMs = timed.reduce((t, o) => t + Number(o.first_msg_ms), 0) / timed.length;
+      if (avgMs > 10 * 60000) add('warning', `A 1ª mensagem leva em média ${Math.round(avgMs / 60000)} min para sair`, 'Quanto antes o comprador recebe a chave, menor a chance de cancelamento ou reclamação. Verifique em Fila se há pedidos esperando o chat abrir.');
+    }
+    const order = { critical: 0, serious: 1, warning: 2, info: 3, good: 4 };
+    return tips.sort((a, b) => order[a.level] - order[b.level]);
+  }
+
+  function anRenderTips(tips) {
+    const box = $('an-tips'); if (!box) return;
+    box.innerHTML = '';
+    if (!tips.length) { box.appendChild(el('div', { class: 'muted small' }, 'Sem pontos de atenção no período — nada fora do normal nos números.')); return; }
+    const LBL = { critical: ['⛔', 'Urgente'], serious: ['🔶', 'Importante'], warning: ['⚠', 'Atenção'], info: ['💡', 'Ponto a analisar'], good: ['✅', 'Bom sinal'] };
+    for (const t of tips) {
+      const [icon, label] = LBL[t.level];
+      const item = el('div', { class: `an-tipcard ${t.level}` });
+      item.append(el('div', { class: 'an-tip-head' }, el('span', { class: 'an-tip-icon', 'aria-hidden': 'true' }, icon), el('span', { class: 'an-tip-level' }, label), el('strong', {}, t.title)),
+        el('div', { class: 'an-tip-detail' }, t.detail));
+      box.appendChild(item);
+    }
+  }
+
+  function anExportCSV() {
+    const s = state.an;
+    if (!s.cur) { toast('Faça uma análise primeiro', 'warn'); return; }
+    const q = csvCell;
+    const head = ['pedido', 'data', 'status', 'comprador', 'anuncio', 'titulo', 'tipo', 'unidades', 'total', 'tarifas', 'uf', 'cidade', 'cancelado_apos_pagar', 'reclamacao', 'motivo'];
+    const rows = anFilterOrders(s.cur.orders).map(o => {
+      const c = anClassify(o), g = geoOf(o, s.geo), it = (o.it || [])[0] || {};
+      const motivo = c.claim ? o.md.map(id => s.claims[id]?.reason || '').filter(Boolean).join(' / ') : (c.cancelledAfterPay ? anCancelReason(o).why : '');
+      return [o.id, brDateTime(o.d), o.st, o.n, it.id, it.t, it.lt === 'gold_pro' ? 'Premium' : 'Clássico', c.units,
+        String(o.tot).replace('.', ','), String(c.fees.toFixed(2)).replace('.', ','), g.s, g.c, c.cancelledAfterPay ? 'sim' : '', c.claim ? 'sim' : '', motivo].map(q).join(';');
+    });
+    const blob = new Blob(['﻿' + [head.join(';'), ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `vendas_${s.per.from}_a_${s.per.to}.csv`;
+    a.click(); URL.revokeObjectURL(a.href);
+    toast('CSV baixado', 'ok');
   }
 
 })();

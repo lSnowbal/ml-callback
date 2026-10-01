@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=628">
+<link rel="stylesheet" href="style.css?v=629">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -170,12 +170,17 @@
       <div class="block">
         <div class="block-head"><h2>1. Ponto de partida</h2></div>
         <div class="seg-row">
-          <button class="btn ghost sm active" data-cr-start="copy">📄 Copiar um anúncio meu</button>
+          <button class="btn ghost sm active" data-cr-start="copy">📄 Copiar um anúncio</button>
           <button class="btn ghost sm" data-cr-start="scratch">✨ Começar do zero</button>
         </div>
         <div id="cr-copy-box" style="margin-top:12px">
           <p class="muted small">O jeito mais rápido: usa categoria, ficha técnica, fotos, descrição e mensagens de um anúncio que já funciona. Depois você muda o que precisar.</p>
-          <input class="search" id="cr-copy-search" placeholder="🔍 Buscar entre seus anúncios…" style="width:100%;margin:8px 0">
+          <div class="toolbar cr-link-row">
+            <input class="search" id="cr-copy-url" placeholder="🔗 Cole o link ou o código (MLB-…) de qualquer anúncio do Mercado Livre" aria-label="Link ou código do anúncio">
+            <button class="btn dark" id="btn-cr-copy-url">Copiar dados</button>
+          </div>
+          <p class="muted small">Anúncio de outro vendedor: copiamos só categoria, ficha técnica e título — as fotos e a descrição dele não são copiadas.</p>
+          <input class="search" id="cr-copy-search" placeholder="🔍 Ou escolha entre os seus anúncios…" style="width:100%;margin:8px 0">
           <div id="cr-copy-list" class="msg-prod-list scroll-list" style="max-height:300px"></div>
         </div>
         <div id="cr-scratch-box" class="hidden" style="margin-top:12px">
@@ -187,27 +192,50 @@
           <div id="cr-predict-list" class="cr-predict"></div>
         </div>
         <div id="cr-cat-info" class="small" style="margin-top:12px"></div>
+        <div id="cr-src-note" class="hidden"></div>
         <div id="cr-up-note" class="muted small hidden" style="margin-top:6px">Sua conta usa o modelo "Produtos do vendedor" do Mercado Livre: o título é enviado como nome do produto (family_name) — o sistema cuida disso.</div>
       </div>
 
       <div class="block hidden" id="cr-form">
         <div class="block-head"><h2>2. Dados do anúncio</h2><span class="muted small" id="cr-draft-status"></span></div>
         <div class="form-grid">
-          <label>Título <span class="muted small" id="cr-title-count">0/60</span>
+          <label>Título principal <span class="muted small" id="cr-title-count">0/60</span>
             <input id="cr-title" maxlength="60" placeholder="Produto + marca + modelo + principal característica">
           </label>
-          <div class="toolbar" style="margin-top:-4px"><button class="btn ghost sm" id="btn-cr-ai-title">✨ Sugerir títulos com IA</button><div id="cr-title-options" class="cr-title-opts"></div></div>
-          <div class="cr-row3">
-            <label>Preço (R$)<input id="cr-price" type="number" min="0" step="0.01" placeholder="0,00"></label>
-            <label>Estoque<input id="cr-qty" type="number" min="1" value="1"></label>
-            <label>Tipo de anúncio
-              <select id="cr-type"><option value="gold_special">Clássico</option><option value="gold_pro">Premium</option></select>
-            </label>
+          <div class="cr-vars">
+            <div class="cr-vars-head">
+              <div><strong class="small">Variações de título</strong> <span class="muted small">— opcional: cada variação vira mais um anúncio do mesmo produto</span></div>
+              <div class="cr-vars-btns">
+                <button class="btn ghost sm" id="btn-cr-add-var">+ Variação</button>
+                <button class="btn ghost sm" id="btn-cr-ai-title">✨ Sugerir nomes com IA</button>
+              </div>
+            </div>
+            <div id="cr-title-vars" class="cr-title-vars"></div>
+            <div id="cr-title-options" class="cr-title-opts"></div>
           </div>
-          <div id="cr-fees" class="cr-fees"></div>
+
+          <div class="cr-sub">Formato e preço — marque um ou os dois</div>
+          <div class="cr-formats">
+            <div class="cr-format" id="cr-fmt-row-classic">
+              <label class="cr-fmt-check"><input type="checkbox" id="cr-fmt-classic" checked> <span><strong>Clássico</strong><span class="muted small cr-fmt-desc">tarifa menor</span></span></label>
+              <label class="cr-fmt-price">R$ <input id="cr-price" type="number" min="0" step="0.01" placeholder="0,00" aria-label="Preço no Clássico"></label>
+              <span class="cr-fmt-fee muted small" id="cr-fee-classic"></span>
+            </div>
+            <div class="cr-format" id="cr-fmt-row-premium">
+              <label class="cr-fmt-check"><input type="checkbox" id="cr-fmt-premium"> <span><strong>Premium</strong><span class="muted small cr-fmt-desc">parcelado sem juros, mais exposição</span></span></label>
+              <label class="cr-fmt-price">R$ <input id="cr-price-premium" type="number" min="0" step="0.01" placeholder="0,00" aria-label="Preço no Premium"></label>
+              <span class="cr-fmt-fee muted small" id="cr-fee-premium"></span>
+              <button class="btn ghost sm cr-match" id="btn-cr-match-net" title="Calcula o preço do Premium para você receber o mesmo valor líquido do Clássico">= mesmo líquido do Clássico</button>
+            </div>
+          </div>
+          <div id="cr-fees" class="cr-fees-notes muted small"></div>
+          <div id="cr-batch-count" class="small cr-batch-count"></div>
           <div class="cr-row3">
+            <label>Estoque (em cada anúncio)<input id="cr-qty" type="number" min="1" value="1"></label>
             <label>Condição<select id="cr-condition"></select></label>
             <label>Entrega<select id="cr-shipping"></select></label>
+          </div>
+          <div class="cr-row3">
             <label>Garantia
               <select id="cr-warranty-type">
                 <option value="">— não informar —</option>
@@ -216,8 +244,8 @@
                 <option value="Garantia de fábrica">Garantia de fábrica</option>
               </select>
             </label>
+            <label id="cr-warranty-time-wrap" class="hidden">Tempo de garantia<input id="cr-warranty-time" placeholder="Ex: 30 dias, 12 meses"></label>
           </div>
-          <label id="cr-warranty-time-wrap" class="hidden">Tempo de garantia<input id="cr-warranty-time" placeholder="Ex: 30 dias, 12 meses"></label>
         </div>
       </div>
 
@@ -271,7 +299,8 @@
 
       <div class="block hidden" id="cr-publish-block">
         <div class="block-head"><h2>7. Revisar e publicar</h2></div>
-        <p class="muted small">"Validar" pergunta ao Mercado Livre se está tudo certo, sem criar nada. "Publicar pausado" cria o anúncio desligado para você revisar no ML antes de ativar.</p>
+        <p class="muted small">Cada linha é um anúncio que será criado — desmarque o que não quiser. "Validar" pergunta ao Mercado Livre se está tudo certo, sem criar nada. "Publicar pausado" cria desligado para você revisar no ML antes de ativar.</p>
+        <div id="cr-batch" class="cr-batch"></div>
         <div id="cr-result" style="margin:10px 0"></div>
         <div class="toolbar">
           <button class="btn dark" id="btn-cr-validate">✔ Validar no Mercado Livre</button>
@@ -412,34 +441,113 @@
     <section class="screen hidden" data-screen="estatisticas">
       <div class="screen-head">
         <h1>Estatísticas</h1>
-        <p class="muted">Análise de desempenho do sistema</p>
+        <p class="muted">Suas vendas no período que você escolher: faturamento, onde você mais vende, onde há mais problemas e o que vale analisar</p>
       </div>
-      <div class="cards">
-        <div class="card">
-          <div class="card-label">Taxa de Sucesso</div>
-          <div class="card-value green" id="kpi-success">0%</div>
-          <div class="card-tip muted small">Mensagens enviadas vs total</div>
+
+      <div class="block an-filters">
+        <div class="an-filter-row">
+          <div class="an-seg" role="group" aria-label="Período">
+            <button class="an-seg-btn" data-an-range="7">7 dias</button>
+            <button class="an-seg-btn active" data-an-range="30">30 dias</button>
+            <button class="an-seg-btn" data-an-range="90">90 dias</button>
+            <button class="an-seg-btn" data-an-range="month">Este mês</button>
+            <button class="an-seg-btn" data-an-range="lastmonth">Mês passado</button>
+            <button class="an-seg-btn" data-an-range="custom">Escolher datas</button>
+          </div>
+          <div id="an-custom" class="an-custom hidden">
+            <label>De <input type="date" id="an-from"></label>
+            <label>Até <input type="date" id="an-to"></label>
+            <button class="btn blue sm" id="btn-an-apply">Aplicar</button>
+          </div>
         </div>
-        <div class="card">
-          <div class="card-label">Tempo Médio</div>
-          <div class="card-value blue" id="kpi-avg">—</div>
-          <div class="card-tip muted small">Da venda à 1ª mensagem</div>
+        <div class="an-filter-row">
+          <select id="an-region" aria-label="Região"></select>
+          <select id="an-uf" aria-label="Estado"></select>
+          <label class="an-check"><input type="checkbox" id="an-compare" checked> Comparar com o período anterior</label>
+          <div class="an-actions">
+            <button class="btn dark sm" id="btn-an-run" title="Busca de novo no Mercado Livre">↻ Atualizar</button>
+            <button class="btn ghost sm" id="btn-an-csv" title="Pedidos do período (com o filtro aplicado)">⬇ CSV</button>
+          </div>
         </div>
-        <div class="card">
-          <div class="card-label">Conversão</div>
-          <div class="card-value violet" id="kpi-conv">0%</div>
-          <div class="card-tip muted small">Pedidos confirmados</div>
+        <div class="an-statusline">
+          <span id="an-status" class="muted small" aria-live="polite"></span>
+          <span class="an-filterline"><span id="an-filter-label" class="small"></span>
+            <button class="btn ghost sm hidden" id="btn-an-clear-filter">✕ Limpar filtro</button></span>
         </div>
       </div>
-      <div class="block">
-        <div class="block-head"><h2>Vendas por Dia</h2></div>
-        <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+
+      <div id="an-body">
+        <div id="an-empty" class="block muted small">Escolha um período para ver a análise. Os pedidos vêm direto do Mercado Livre — nada é gravado no Worker.</div>
+        <div id="an-results" class="hidden">
+          <div id="an-kpis" class="an-kpis"></div>
+          <p id="an-kpi-note" class="muted small an-note"></p>
+
+          <div class="block">
+            <div class="block-head"><h2>Dicas e pontos a analisar</h2></div>
+            <p class="muted small an-note">Calculadas a partir dos números do período — são sinais para investigar, não certezas.</p>
+            <div id="an-tips" class="an-tips"></div>
+          </div>
+
+          <div class="block">
+            <div class="block-head"><h2 id="an-rev-title">Faturamento por dia</h2></div>
+            <div id="an-rev-chart" class="an-chart"></div>
+          </div>
+
+          <div class="block">
+            <div class="block-head"><h2>Onde você mais vende</h2></div>
+            <div class="an-geo">
+              <div id="an-map" class="an-map"></div>
+              <div id="an-uf-bars" class="an-uf-bars"></div>
+            </div>
+          </div>
+
+          <div class="block">
+            <div class="block-head an-head-wrap"><h2>Pesquisa por região</h2>
+              <input class="search an-search" id="an-city-search" placeholder="🔍 Buscar cidade ou estado…" aria-label="Buscar cidade ou estado">
+            </div>
+            <p class="muted small an-note">Sem busca: um estado por linha. Busque uma cidade, ou escolha um estado no filtro ou no mapa para ver as cidades.</p>
+            <div id="an-geo-table"></div>
+          </div>
+
+          <div class="block">
+            <div class="block-head"><h2>Onde há mais problemas</h2></div>
+            <p class="muted small an-note">Problema = cancelamento depois de pagar, reclamação ou contestação no cartão. Estados com menos de 5 vendas ficam de fora do ranking.</p>
+            <div id="an-problems"></div>
+          </div>
+
+          <div class="block">
+            <div class="block-head"><h2>Anúncios no período</h2></div>
+            <div id="an-products"></div>
+          </div>
+
+          <div class="block">
+            <div class="block-head"><h2>Horários de venda</h2></div>
+            <p class="muted small an-note">Pedidos pagos por dia da semana e hora (horário de Brasília).</p>
+            <div id="an-heat" class="an-heat-wrap"></div>
+          </div>
+        </div>
       </div>
 
       <div class="block">
-        <div class="block-head"><h2>Mapa de Calor — horários de venda</h2></div>
-        <p class="muted small">Quando seus compradores compram. Use para saber quando vale reforçar estoque, ativar anúncios ou estar disponível.</p>
-        <div id="heatmap" style="margin-top:12px;overflow-x:auto"></div>
+        <div class="block-head"><h2>Desempenho do envio automático</h2></div>
+        <div class="cards" style="margin-bottom:8px">
+          <div class="card">
+            <div class="card-label">Mensagens entregues</div>
+            <div class="card-value green" id="kpi-success">—</div>
+            <div class="card-tip muted small">Enviadas ÷ previstas</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Tempo médio</div>
+            <div class="card-value blue" id="kpi-avg">—</div>
+            <div class="card-tip muted small">Da venda à 1ª mensagem</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Entregas confirmadas</div>
+            <div class="card-value violet" id="kpi-conv">—</div>
+            <div class="card-tip muted small">Pedidos com entrega confirmada</div>
+          </div>
+        </div>
+        <p class="muted small" id="kpi-sample"></p>
       </div>
 
       <div class="block">
@@ -914,6 +1022,6 @@
   </div>
 </div>
 
-<script src="app.js?v=628"></script>
+<script src="app.js?v=629"></script>
 </body>
 </html>
