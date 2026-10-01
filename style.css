@@ -784,3 +784,65 @@ body { background: var(--bg-grad); }
 /* ─── Respostas rápidas no chat ─── */
 .qr-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .qr-row .btn { white-space: nowrap; }
+
+/* ─── Criar Anúncio (v6.28) ─── */
+.seg-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.seg-row .btn.active { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+.cr-copy-row { grid-template-columns: 44px 1fr auto; }
+.cr-thumb-sm { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; background: var(--surface-2); display: block; }
+.cr-predict { display: grid; gap: 6px; margin-top: 10px; }
+.cr-cat-opt {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+  padding: 10px 12px; border-radius: 10px; cursor: pointer; font: inherit; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+}
+.cr-cat-opt:hover { border-color: var(--accent-2); }
+.cr-cat-opt.best { border-color: var(--accent); }
+.cr-children { display: flex; flex-wrap: wrap; gap: 6px; }
+.cr-row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.cr-row3 label, #cr-root .form-grid label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
+#cr-root input:not([type=checkbox]):not([type=file]), #cr-root select, #cr-root textarea {
+  display: block; width: 100%; margin-top: 6px; padding: 10px 12px;
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: 10px; color: var(--text); font-size: 13px; font-family: inherit;
+}
+#cr-root .toolbar input.search, #cr-root #cr-copy-search { margin-top: 0; }
+#cr-root input:focus, #cr-root select:focus, #cr-root textarea:focus { outline: none; border-color: var(--accent-2); }
+.cr-fees { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+.cr-fee {
+  display: flex; flex-direction: column; gap: 2px; min-width: 180px; flex: 1;
+  padding: 10px 12px; border-radius: 10px; cursor: pointer; font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.cr-fee.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.cr-fee strong { font-size: 13px; }
+.cr-net { color: var(--accent); font-weight: 600; font-size: 13px; }
+.cr-fees > .muted { flex-basis: 100%; }
+.cr-title-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.cr-photos { display: flex; flex-wrap: wrap; gap: 10px; }
+.cr-photo {
+  position: relative; width: 110px; height: 110px; border-radius: 10px; overflow: hidden;
+  background: #fff; border: 1px solid var(--border-strong);
+}
+.cr-photo.cover { border: 2px solid var(--accent); }
+.cr-photo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cr-photo-wait { display: flex; align-items: center; justify-content: center; height: 100%; font-size: 12px; color: #555; }
+.cr-cover-tag { position: absolute; left: 6px; top: 6px; background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
+.cr-photo-acts { position: absolute; right: 4px; bottom: 4px; display: flex; gap: 4px; }
+.cr-photo-acts .icon-btn { width: 26px; height: 26px; font-size: 12px; background: rgba(0,0,0,.6); color: #fff; border-radius: 6px; border: 0; cursor: pointer; }
+.cr-attrs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cr-attr { display: block; font-size: 12px; font-weight: 600; color: var(--muted); }
+.cr-attr.req .cr-attr-name { color: var(--text); }
+.cr-attr .muted.small { display: block; font-weight: 400; margin-top: 4px; }
+.cr-unit { display: grid; grid-template-columns: 1fr 110px; gap: 6px; }
+.cr-sender { margin-top: 8px; transition: opacity .15s; }
+.cr-sender.dim { opacity: .5; }
+.cr-msgs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.cr-errors { margin: 8px 0 0 18px; line-height: 1.6; }
+.cr-errors li { margin-bottom: 4px; }
+@media (max-width: 768px) {
+  .cr-row3, .cr-attrs, .cr-msgs { grid-template-columns: 1fr; }
+  .cr-copy-row { grid-template-columns: 40px 1fr; }
+  .cr-copy-row .btn { display: none; }
+  .cr-photo { width: calc(33% - 7px); height: auto; aspect-ratio: 1; }
+}

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=627">
+<link rel="stylesheet" href="style.css?v=628">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -41,6 +41,7 @@
     <nav class="nav">
       <button class="nav-btn active" data-screen="dashboard"><span class="nav-icon">⊞</span><span>Dashboard</span></button>
       <button class="nav-btn" data-screen="produtos"><span class="nav-icon">▦</span><span>Produtos</span></button>
+      <button class="nav-btn" data-screen="criar"><span class="nav-icon">➕</span><span>Criar Anúncio</span></button>
       <button class="nav-btn" data-screen="mensagens"><span class="nav-icon">✉</span><span>Mensagens</span></button>
       <button class="nav-btn" data-screen="pedidos"><span class="nav-icon">⊙</span><span>Pedidos</span></button>
       <button class="nav-btn" data-screen="fila"><span class="nav-icon">⏳</span><span>Fila</span></button>
@@ -79,6 +80,10 @@
       <div class="screen-head">
         <h1>Dashboard</h1>
         <p class="muted">Visão geral e controle do monitoramento</p>
+      </div>
+      <div class="msg-vars hidden" id="token-warning" style="border-left:3px solid var(--danger);margin-bottom:14px">
+        <strong>🔴 O token do Mercado Livre não está renovando.</strong>
+        <div class="muted small" style="margin-top:4px">As mensagens ficam na fila e saem quando a conexão voltar. Vá em Configurações → OAuth Mercado Livre e clique em "Iniciar autorização".</div>
       </div>
       <div class="action-bar">
         <button class="btn green" id="btn-activate">▶ Ativar</button>
@@ -132,7 +137,7 @@
           <option value="paused">Anúncios pausados</option>
           <option value="low">Estoque baixo (≤5)</option>
         </select>
-        <button class="btn ghost" id="btn-prod-csv-export">↓ CSV</button><button class="btn ghost" id="btn-prod-csv-import">↑ Importar CSV</button><input type="file" id="prod-csv-file" accept=".csv,text/csv" style="display:none"><button class="btn dark" id="btn-loadprods">↻ Carregar</button>
+        <button class="btn ghost" id="btn-prod-csv-export">↓ CSV</button><button class="btn ghost" id="btn-prod-csv-import">↑ Importar CSV</button><input type="file" id="prod-csv-file" accept=".csv,text/csv" style="display:none"><button class="btn dark" id="btn-loadprods">↻ Carregar</button><button class="btn green" data-goto="criar">➕ Criar anúncio</button>
         <span class="muted small" id="prod-count"></span>
       </div>
 
@@ -153,6 +158,128 @@
       </div>
 
       <div class="prod-list scroll-list" id="prod-list"></div>
+    </section>
+
+    <section class="screen hidden" data-screen="criar" id="cr-root">
+      <div class="screen-head">
+        <h1>Criar Anúncio</h1>
+        <p class="muted">Publique um anúncio novo no Mercado Livre em poucos passos — já com o envio automático configurado</p>
+      </div>
+      <div class="msg-vars hidden" id="cr-restore" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px"></div>
+
+      <div class="block">
+        <div class="block-head"><h2>1. Ponto de partida</h2></div>
+        <div class="seg-row">
+          <button class="btn ghost sm active" data-cr-start="copy">📄 Copiar um anúncio meu</button>
+          <button class="btn ghost sm" data-cr-start="scratch">✨ Começar do zero</button>
+        </div>
+        <div id="cr-copy-box" style="margin-top:12px">
+          <p class="muted small">O jeito mais rápido: usa categoria, ficha técnica, fotos, descrição e mensagens de um anúncio que já funciona. Depois você muda o que precisar.</p>
+          <input class="search" id="cr-copy-search" placeholder="🔍 Buscar entre seus anúncios…" style="width:100%;margin:8px 0">
+          <div id="cr-copy-list" class="msg-prod-list scroll-list" style="max-height:300px"></div>
+        </div>
+        <div id="cr-scratch-box" class="hidden" style="margin-top:12px">
+          <p class="muted small">Escreva o nome do produto como o comprador procuraria. O Mercado Livre sugere a categoria certa.</p>
+          <div class="toolbar">
+            <input class="search" id="cr-predict-q" placeholder="Ex: EaseUS Data Recovery Wizard Pro licença 1 ano">
+            <button class="btn dark" id="btn-cr-predict">🔎 Sugerir categoria</button>
+          </div>
+          <div id="cr-predict-list" class="cr-predict"></div>
+        </div>
+        <div id="cr-cat-info" class="small" style="margin-top:12px"></div>
+        <div id="cr-up-note" class="muted small hidden" style="margin-top:6px">Sua conta usa o modelo "Produtos do vendedor" do Mercado Livre: o título é enviado como nome do produto (family_name) — o sistema cuida disso.</div>
+      </div>
+
+      <div class="block hidden" id="cr-form">
+        <div class="block-head"><h2>2. Dados do anúncio</h2><span class="muted small" id="cr-draft-status"></span></div>
+        <div class="form-grid">
+          <label>Título <span class="muted small" id="cr-title-count">0/60</span>
+            <input id="cr-title" maxlength="60" placeholder="Produto + marca + modelo + principal característica">
+          </label>
+          <div class="toolbar" style="margin-top:-4px"><button class="btn ghost sm" id="btn-cr-ai-title">✨ Sugerir títulos com IA</button><div id="cr-title-options" class="cr-title-opts"></div></div>
+          <div class="cr-row3">
+            <label>Preço (R$)<input id="cr-price" type="number" min="0" step="0.01" placeholder="0,00"></label>
+            <label>Estoque<input id="cr-qty" type="number" min="1" value="1"></label>
+            <label>Tipo de anúncio
+              <select id="cr-type"><option value="gold_special">Clássico</option><option value="gold_pro">Premium</option></select>
+            </label>
+          </div>
+          <div id="cr-fees" class="cr-fees"></div>
+          <div class="cr-row3">
+            <label>Condição<select id="cr-condition"></select></label>
+            <label>Entrega<select id="cr-shipping"></select></label>
+            <label>Garantia
+              <select id="cr-warranty-type">
+                <option value="">— não informar —</option>
+                <option value="Sem garantia">Sem garantia</option>
+                <option value="Garantia do vendedor">Garantia do vendedor</option>
+                <option value="Garantia de fábrica">Garantia de fábrica</option>
+              </select>
+            </label>
+          </div>
+          <label id="cr-warranty-time-wrap" class="hidden">Tempo de garantia<input id="cr-warranty-time" placeholder="Ex: 30 dias, 12 meses"></label>
+        </div>
+      </div>
+
+      <div class="block hidden" id="cr-photos-block">
+        <div class="block-head"><h2>3. Fotos</h2><span class="muted small"><span id="cr-photo-count">0 foto(s)</span> · <span id="cr-photo-max">até 10 fotos</span></span></div>
+        <p class="muted small">A primeira é a capa (fundo branco rende mais). As fotos são reduzidas no seu navegador antes de enviar.</p>
+        <div id="cr-photos" class="cr-photos"></div>
+        <div class="toolbar" style="margin-top:10px">
+          <button class="btn dark" id="btn-cr-addphoto">+ Adicionar fotos</button>
+          <button class="btn ghost sm" id="btn-cr-photo-url">🔗 Usar URL</button>
+          <input type="file" id="cr-photo-file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+        </div>
+      </div>
+
+      <div class="block hidden" id="cr-attrs-block">
+        <div class="block-head"><h2>4. Ficha técnica</h2></div>
+        <div id="cr-gtin-note" class="muted small hidden" style="margin-bottom:8px">Sem código de barras (comum em software/chave digital)? Deixe o GTIN vazio e escolha o motivo em "Motivo de GTIN vazio".</div>
+        <div id="cr-attrs-required" class="cr-attrs"></div>
+        <details class="templates-section" style="margin-top:12px">
+          <summary>Mais características (opcional) <span class="muted small" id="cr-attrs-more-count"></span></summary>
+          <div id="cr-attrs-more" class="cr-attrs" style="margin-top:10px"></div>
+        </details>
+      </div>
+
+      <div class="block hidden" id="cr-desc-block">
+        <div class="block-head"><h2>5. Descrição</h2><button class="btn ghost sm" id="btn-cr-ai-desc">✨ Escrever com IA</button></div>
+        <textarea id="cr-desc" rows="10" style="width:100%" placeholder="Texto simples. Sem links, telefone ou e-mail (o Mercado Livre recusa)."></textarea>
+        <input id="cr-ai-notes" placeholder="Opcional: o que a IA deve destacar (ex: entrega imediata pelo chat, licença de 1 ano)" style="width:100%;margin-top:8px">
+      </div>
+
+      <div class="block hidden" id="cr-sender-block">
+        <div class="block-head"><h2>6. Envio automático (opcional)</h2></div>
+        <label class="switch-row"><input type="checkbox" id="cr-sender-on"><span><strong>Ligar o envio automático neste anúncio</strong> — as mensagens abaixo saem a cada venda</span></label>
+        <div id="cr-sender-fields" class="cr-sender dim">
+          <select id="cr-sender-tpl" style="margin:10px 0"></select>
+          <div class="cr-msgs">
+            <textarea data-cr-msg="0" rows="3" placeholder="Mensagem 1 (boas-vindas)"></textarea>
+            <textarea data-cr-msg="1" rows="3" placeholder="Mensagem 2"></textarea>
+            <textarea data-cr-msg="2" rows="3" placeholder="Mensagem 3 (ex: Sua chave: {key})"></textarea>
+            <textarea data-cr-msg="3" rows="3" placeholder="Mensagem 4"></textarea>
+          </div>
+          <div class="muted small" style="margin-top:6px">Variáveis: <code>{nome}</code> <code>{primeiro_nome}</code> <code>{key}</code> <code>{pedido}</code> <code>{produto}</code></div>
+          <div class="cr-row3" style="margin-top:10px">
+            <label>Chave/serial (para {key})<input id="cr-key" placeholder="Opcional"></label>
+            <label>Intervalo mín. (s)<input id="cr-delay-min" type="number" min="0" value="30"></label>
+            <label>Intervalo máx. (s)<input id="cr-delay-max" type="number" min="0" value="90"></label>
+          </div>
+          <div class="muted small" id="cr-key-note"></div>
+        </div>
+      </div>
+
+      <div class="block hidden" id="cr-publish-block">
+        <div class="block-head"><h2>7. Revisar e publicar</h2></div>
+        <p class="muted small">"Validar" pergunta ao Mercado Livre se está tudo certo, sem criar nada. "Publicar pausado" cria o anúncio desligado para você revisar no ML antes de ativar.</p>
+        <div id="cr-result" style="margin:10px 0"></div>
+        <div class="toolbar">
+          <button class="btn dark" id="btn-cr-validate">✔ Validar no Mercado Livre</button>
+          <button class="btn ghost" id="btn-cr-publish-paused">⏸ Publicar pausado</button>
+          <button class="btn green" id="btn-cr-publish">🚀 Publicar agora</button>
+          <button class="btn ghost sm" id="btn-cr-reset">Começar de novo</button>
+        </div>
+      </div>
     </section>
 
     <section class="screen hidden" data-screen="mensagens">
@@ -210,6 +337,7 @@
           <option value="pending">Aguardando</option>
           <option value="sending">Enviando</option>
           <option value="done">Concluídos</option>
+          <option value="skipped">Pulados / com problema</option>
         </select>
         <select id="ord-date-filter">
           <option value="all">Qualquer data</option>
@@ -464,11 +592,11 @@
             <span class="muted small" id="bc-charcount">0 / 350</span>
           </label>
           <div style="display:flex;gap:8px;align-items:end">
-            <label style="flex:1">Delay mínimo (s)<input type="number" id="bc-delay-min" value="15" min="5"></label>
-            <label style="flex:1">Delay máximo (s)<input type="number" id="bc-delay-max" value="45" min="5"></label>
+            <label style="flex:1">Intervalo mínimo (s)<input type="number" id="bc-delay-min" value="60" min="60"></label>
+            <label style="flex:1">Intervalo máximo (s)<input type="number" id="bc-delay-max" value="120" min="60"></label>
           </div>
           <div class="msg-vars">
-            <div class="muted small" style="margin-bottom:8px"><strong>⚠ Importante:</strong> mensagens serão enviadas com delay aleatório entre os limites configurados. Mensagens só são entregues se o chat estiver aberto (cliente já interagiu). Os bloqueados aparecerão como "skipped".</div>
+            <div class="muted small" style="margin-bottom:8px"><strong>Como funciona:</strong> o envio roda no servidor, uma mensagem por vez, com intervalo aleatório entre os limites (mínimo 1 minuto) — pode fechar o painel. Só chega a quem tem o chat da compra aberto; os demais aparecem como "chat fechado". Máximo de 300 destinatários por vez.</div>
             <button class="btn red" id="btn-bc-send">📢 Enviar Broadcast</button>
           </div>
         </div>
@@ -498,7 +626,7 @@
       </div>
       <div class="block">
         <div class="block-head"><h2>Reprocessar Pedido</h2></div>
-        <p class="muted small">Use isso se um pedido já foi processado mas você quer enviar mensagens de novo. Remove ele dos "já processados" e ele será detectado no próximo ciclo.</p>
+        <p class="muted small">Busca o pedido de novo no Mercado Livre e envia a sequência completa de mensagens outra vez (com as pausas normais). Serve também para pedidos antigos ou que não chegaram pelo aviso do ML.</p>
         <div class="form-grid">
           <label>ID do Pedido<input id="retry-order" placeholder="2000016295013912"></label>
           <button class="btn warn" id="btn-retry">🔄 Reprocessar</button>
@@ -586,7 +714,7 @@
       <!-- AI assistant config -->
       <div class="block">
         <div class="block-head"><h2>Assistente de IA (respostas a compradores)</h2></div>
-        <p class="muted small">A IA lê perguntas dos compradores e responde as simples automaticamente, ou sugere uma resposta para você aprovar. Requer uma chave de API da OpenAI (paga, mas barata).</p>
+        <p class="muted small">A IA lê perguntas dos compradores e responde as simples automaticamente, ou sugere uma resposta para você aprovar. Funciona com IA gratuita (Cloudflare Workers AI ou IA local no seu PC) ou com serviços pagos por uso. A mesma IA pode escrever títulos e descrições na tela Criar Anúncio.</p>
 
         <div class="ai-row" style="margin-top:12px">
           <label class="switch-row">
@@ -753,6 +881,7 @@
         <div class="form-grid" style="margin-top:10px">
           <label>Client ID<input id="oauth-cid" placeholder="Ex: 8667328126564277"></label>
           <label>Client Secret<input type="password" id="oauth-cs" placeholder="Cole o Client Secret do DevCenter"></label>
+          <label>Redirect URI <span class="muted small">(precisa ser idêntica à cadastrada no DevCenter)</span><input id="oauth-ru" placeholder="https://seu-usuario.github.io/ml-callback"></label>
           <button class="btn green" id="btn-oauth-start">🔑 Iniciar autorização</button>
         </div>
         <div id="oauth-result" style="margin-top:10px"></div>
@@ -762,7 +891,8 @@
         <div class="block-head"><h2>Sobre o Sistema</h2></div>
         <div class="info-grid">
           <div><span class="muted">Worker:</span> <span id="info-worker">—</span></div>
-          <div><span class="muted">Versão:</span> <span id="info-version">—</span></div>
+          <div><span class="muted">Versão do Worker:</span> <span id="info-version">—</span></div>
+          <div><span class="muted">Versão do painel:</span> <span id="info-panel">—</span></div>
           <div><span class="muted">Status:</span> <span id="info-status">—</span></div>
           <div><span class="muted">Token salvo:</span> <span id="info-token">—</span></div>
         </div>
@@ -784,6 +914,6 @@
   </div>
 </div>
 
-<script src="app.js?v=627"></script>
+<script src="app.js?v=628"></script>
 </body>
 </html>
