@@ -4023,10 +4023,15 @@
         anStatus(`${label}: ${intf(out.length)} pedido(s)…`);
         if (r.next_offset == null) break;
         offset = r.next_offset;
-        if (out.length >= 10000) return { orders: out, partial: 'limite de 10.000 pedidos por análise' };
+        if (out.length >= 10000) return { orders: anDedupe(out), partial: 'limite de 10.000 pedidos por análise' };
       }
     }
-    return { orders: out, partial: '' };
+    return { orders: anDedupe(out), partial: '' };
+  }
+  // the same order never counts twice (paging can overlap if new orders arrive mid-search)
+  function anDedupe(list) {
+    const seen = new Set();
+    return list.filter(o => { const k = String(o.id); if (seen.has(k)) return false; seen.add(k); return true; });
   }
 
   // ── localização: cache no navegador (cidade do cadastro muda pouco) ──
@@ -4124,9 +4129,16 @@
       lt: { gold_special: { n: 0, gross: 0, fees: 0 }, gold_pro: { n: 0, gross: 0, fees: 0 } }, unknownGeo: { base: 0, gross: 0, paid: 0, problems: 0 } };
     const bump = (map, key, init) => { let v = map.get(key); if (!v) { v = init(); map.set(key, v); } return v; };
     const placeInit = () => ({ base: 0, paid: 0, gross: 0, problems: 0, cancel: 0, claims: 0, buyers: new Set() });
+    A.byMonth = new Map();
     for (const o of orders) {
       const c = anClassify(o);
       A.orders++;
+      // month by month: every order Mercado Livre returned, for checking against its own reports
+      const mo = bump(A.byMonth, brDayOf(o.d).slice(0, 7), () => ({ orders: 0, paid: 0, cancel: 0, unpaid: 0, gross: 0, units: 0 }));
+      mo.orders++;
+      if (c.paid) { mo.paid++; mo.gross += c.gross; mo.units += c.units; }
+      else if (c.cancelledAfterPay) mo.cancel++;
+      else mo.unpaid++;
       if (c.unpaid) { A.unpaid++; continue; }
       A.base++;
       const geo = g ? geoOf(o, g) : { s: '', c: '' };
@@ -4368,6 +4380,7 @@
     if (!A.orders) return;
     anRenderKPIs(A, P);
     anRenderRevenue(A);
+    anRenderMonths(A);
     anRenderMap(A);
     anRenderTopUF(A);
     anRenderGeoTable(A);
@@ -4463,13 +4476,46 @@
     return { mode, rows: [...out.values()].map(r => ({ ...r, label: label(r.key) })) };
   }
 
+  // Month-by-month table for periods longer than ~6 weeks: orders found per
+  // month (every status) next to revenue and average ticket — the quickest
+  // way to check the numbers against Mercado Livre's own sales report.
+  const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  function anRenderMonths(A) {
+    const box = $('an-months'); if (!box) return;
+    box.innerHTML = '';
+    const per = state.an.per;
+    if (!per || per.days <= 45 || !A.byMonth || !A.byMonth.size) return;
+    const months = [];
+    for (let m = per.from.slice(0, 7); m <= per.to.slice(0, 7);) {
+      months.push(m);
+      const [y, mm] = m.split('-').map(Number);
+      m = mm === 12 ? `${y + 1}-01` : `${y}-${String(mm + 1).padStart(2, '0')}`;
+    }
+    const tot = { orders: 0, paid: 0, cancel: 0, gross: 0 };
+    const rows = months.map(m => {
+      const d = A.byMonth.get(m) || { orders: 0, paid: 0, cancel: 0, gross: 0 };
+      tot.orders += d.orders; tot.paid += d.paid; tot.cancel += d.cancel; tot.gross += d.gross;
+      const [y, mm] = m.split('-');
+      const lastDay = new Date(Date.UTC(Number(y), Number(mm), 0)).getUTCDate();
+      const inProgress = per.to === brDayOf(state.an.cur?.at || Date.now()); // the last day is still running
+      const partial = (m === per.from.slice(0, 7) && per.from.slice(8) !== '01') || (m === per.to.slice(0, 7) && (Number(per.to.slice(8)) < lastDay || inProgress));
+      return [`${MONTHS[Number(mm) - 1]}/${y}${partial ? ' (parcial)' : ''}`, intf(d.orders), intf(d.paid), intf(d.cancel), brl(d.gross), d.paid ? brl(d.gross / d.paid) : '—'];
+    });
+    rows.push(['Total', intf(tot.orders), intf(tot.paid), intf(tot.cancel), brl(tot.gross), tot.paid ? brl(tot.gross / tot.paid) : '—']);
+    box.appendChild(el('div', { class: 'an-sub', style: 'margin-top:16px' }, 'Mês a mês'));
+    box.appendChild(anTable(['Mês', 'Pedidos encontrados', 'Pagos', 'Cancelados após pagar', 'Faturamento', 'Ticket médio'], rows));
+    box.querySelector('tbody tr:last-child')?.classList.add('an-total');
+    box.appendChild(el('div', { class: 'muted small', style: 'margin-top:6px' },
+      'Pedidos encontrados = tudo o que o Mercado Livre devolveu no mês (pagos, cancelados e não pagos). Para conferir, compare com Vendas no Mercado Livre filtrando o mesmo mês. "(parcial)" = o período não cobre o mês inteiro.'));
+  }
+
   function anRenderRevenue(A) {
     const box = $('an-rev-chart'); if (!box) return;
     const { mode, rows } = anBuckets(A);
     const title = $('an-rev-title');
     if (title) title.textContent = { day: 'Faturamento por dia', week: 'Faturamento por semana', month: 'Faturamento por mês' }[mode];
     box.innerHTML = '';
-    const W = Math.max(280, box.clientWidth || 640), H = 230, pad = { l: 58, r: 10, t: 22, b: 28 };
+    const W = Math.max(280, box.clientWidth || 640), H = 230, pad = { l: 74, r: 10, t: 22, b: 28 }; // room for "R$ 12,5 mil"
     const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
     const max = niceMax(Math.max(0, ...rows.map(r => r.gross)));
     const svg = svgEl('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, class: 'an-svg', role: 'img', 'aria-label': (title?.textContent || 'Faturamento') + ' no período' });
