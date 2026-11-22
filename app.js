@@ -5,7 +5,7 @@
   'use strict';
 
   const DEFAULT_WORKER = 'https://crimson-heart-bac6.michaelvmardegam.workers.dev';
-  const PANEL_VERSION = '6.29';
+  const PANEL_VERSION = '6.31';
 
   // ─── State ───────────────────────────────────────────────────────
   const state = {
@@ -113,6 +113,28 @@
     }
   };
 
+  // Files (PDF) from the Worker: same authentication as api()
+  const apiFile = async (path, body) => {
+    const url = state.worker.replace(/\/$/, '') + path;
+    let r;
+    try { r = await fetch(url, { method: 'POST', headers: { 'X-Secret': state.secret, 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); }
+    catch (e) { throw new Error('Conexão falhou: ' + e.message); }
+    if (!r.ok) {
+      let d = {}; try { d = JSON.parse(await r.text()); } catch { /* não é JSON */ }
+      const err = new Error(d.error || `HTTP ${r.status}`); err.status = r.status; throw err;
+    }
+    const hdr = k => { try { return decodeURIComponent((r.headers && r.headers.get && r.headers.get(k)) || ''); } catch { return ''; } };
+    return { blob: await r.blob(), message: hdr('X-Receipt-Message'), file: hdr('X-Receipt-File') };
+  };
+  const openBlob = (blob, name) => {
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = u; a.target = '_blank'; a.rel = 'noopener';
+    if (name) a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 60000);
+  };
+
   // ─── Login flow ─────────────────────────────────────────────────
   let stored = null;
   try { stored = JSON.parse(localStorage.getItem('mlas_auth') || 'null'); } catch { /* dado corrompido: pede login */ }
@@ -216,11 +238,12 @@
       if (name === 'config') initSettings();
       if (name === 'estatisticas') initStats();
       if (name === 'fila') loadQueue();
-      if (name === 'conversas') loadInbox();
+      if (name === 'conversas') { loadInbox(); loadQuestions(); }
       if (name === 'clonar') initCloneSection();
       if (name === 'logs') loadFullLogs();
       if (name === 'chaves') initKeysScreen();
       if (name === 'criar') initCreate();
+      if (name === 'catalogo') initCatalogScreen();
     } catch (e) { console.error(`[switchScreen ${name}]`, e); }
   }
 
@@ -415,18 +438,28 @@
   // ─── Products screen — multi-select with bulk actions ───────────
   state.prodSelected = new Set();
 
-  async function loadProducts() {
+  async function loadProducts(opts = {}) {
     $('prod-list').innerHTML = '<div class="muted small" style="padding:24px;text-align:center">Carregando…</div>';
     try {
       state.products = await api('/api/products');
       renderProducts();
+      // catalog listings: their price-to-win is fetched now when there are few of them
+      const cat = state.products.filter(p => p.catalog_listing).map(p => p.id).filter(id => !state.catInfo[id]);
+      if (!opts.noCatalog && cat.length && cat.length <= 40) catLoad(cat, false);
     } catch (e) { toast(e.message, 'err'); }
   }
 
   function renderProducts() {
     const q = ($('prod-search').value || '').toLowerCase();
     const filter = $('prod-filter').value;
-    const list = $('prod-list'); list.innerHTML = '';
+    const list = $('prod-list');
+    const keepScroll = list.scrollTop;
+    list.innerHTML = '';
+    catBar();
+    if ((filter === 'catalog' || filter === 'catalog_losing') && !state.catLoading) {
+      const missing = state.products.filter(p => p.catalog_listing && !state.catInfo[p.id]).map(p => p.id);
+      if (missing.length) setTimeout(() => catLoad(missing, false), 0);
+    }
 
     const filtered = state.products.filter(p => {
       if (q && !`${p.title || ''}${p.id}`.toLowerCase().includes(q)) return false;
@@ -435,6 +468,8 @@
       if (filter === 'active' && p.listing_status !== 'active') return false;
       if (filter === 'paused' && p.listing_status !== 'paused') return false;
       if (filter === 'low' && (typeof p.available_quantity !== 'number' || p.available_quantity > 5)) return false;
+      if (filter === 'catalog' && !p.catalog_listing) return false;
+      if (filter === 'catalog_losing' && !(p.catalog_listing && state.catInfo[p.id]?.status === 'competing')) return false;
       return true;
     });
 
@@ -447,6 +482,7 @@
     }
 
     filtered.forEach(p => list.appendChild(productCard(p)));
+    list.scrollTop = keepScroll;
     updateProdBulkBar();
   }
 
@@ -478,12 +514,23 @@
     meta.appendChild(el('span', { class: stockClass }, `📦 ${p.available_quantity}`));
     if (p.product_key) meta.appendChild(el('span', {}, `🔑 ${p.product_key}`));
     meta.appendChild(el('span', {}, `⏱ ${p.delay_min}-${p.delay_max}s`));
+    if (p.catalog_listing) {
+      const badge = catBadge(p);
+      badge.classList.add('cat-click');
+      badge.addEventListener('click', e => { e.stopPropagation(); openCatalog(p); });
+      meta.appendChild(badge);
+      const cs = state.catSettings[p.id] || { cat_min: p.cat_min, cat_auto: p.cat_auto };
+      if (cs.cat_min) meta.appendChild(el('span', { title: 'Preço mínimo no catálogo' }, `mín. ${catBrl(cs.cat_min)}${cs.cat_auto ? ' · auto' : ''}`));
+    }
     info.appendChild(meta);
 
     const editBtn = el('button', { class: 'btn ghost sm', onclick: e => { e.stopPropagation(); editProduct(p); }, title: 'Configurar' }, '⚙');
 
     row.addEventListener('click', e => { if (e.target !== cb) cb.click(); });
-    row.append(cb, toggle, info, editBtn);
+    const acts = el('div', { class: 'prod-acts' });
+    if (p.catalog_listing) acts.appendChild(el('button', { class: 'btn ghost sm', onclick: e => { e.stopPropagation(); openCatalog(p); }, title: 'Catálogo: preço para ganhar' }, '🏷'));
+    acts.appendChild(editBtn);
+    row.append(cb, toggle, info, acts);
     return row;
   }
 
@@ -1009,7 +1056,9 @@
       else status = ['pending', '⏳ Aguardando'];
       tr.appendChild(el('td', {}, el('span', { class: `tag ${status[0]}` }, status[1])));
       tr.appendChild(el('td', {}, formatDate(o.created_at)));
-      tr.appendChild(el('td', {}, el('button', { class: 'btn ghost sm', onclick: () => copy(o.order_id) }, '📋')));
+      tr.appendChild(el('td', { class: 'ord-acts' },
+        el('button', { class: 'btn ghost sm', title: 'Recibo de venda (PDF)', onclick: () => openReceiptModal(o) }, '📄'),
+        el('button', { class: 'btn ghost sm', title: 'Copiar nº do pedido', onclick: () => copy(o.order_id) }, '📋')));
       tbody.appendChild(tr);
     });
   }
@@ -1426,6 +1475,8 @@
     loadAIConfig();
     loadQuickReplies();
     loadTelegram();
+    loadReceipt();
+    loadCatalogCfg();
     loadAbout();
     const ru = $('oauth-ru');
     if (ru && !ru.value) ru.value = localStorage.getItem('mlas_oauth_ru') || defaultRedirectUri();
@@ -1859,11 +1910,40 @@
     on('btn-clone-start', 'click', startClone);
     on('clone-search', 'input', renderCloneProducts);
     on('btn-load-inbox', 'click', loadInbox);
+    on('btn-q-load', 'click', loadQuestions);
+    // tela Catálogo
+    $$('[data-cat-tab]').forEach(b => b.addEventListener('click', () => catTab(b.dataset.catTab)));
+    on('btn-catm-refresh', 'click', () => catMineLoad(true));
+    on('catm-search', 'input', () => catMineRender());
+    on('catm-filter', 'change', () => catMineRender());
+    on('btn-cats-go', 'click', catSearch);
+    on('cats-q', 'keydown', e => { if (e.key === 'Enter') { e.preventDefault(); catSearch(); } });
     on('btn-ai-save', 'click', saveAIConfig);
     on('btn-ai-test', 'click', testAI);
     on('btn-qr-add', 'click', () => { state.quickReplies.push({ label: '', text: '' }); renderQuickRepliesConfig(); });
     on('btn-qr-save', 'click', saveQuickReplies);
     on('btn-tg-connect', 'click', connectTelegram);
+    on('tg-twoway', 'change', async e => {
+      const want = e.target.checked; e.target.disabled = true;
+      try {
+        await api('/api/telegram', { method: 'POST', body: { two_way: want } });
+        toast(want ? 'Responder pelo Telegram ativado — veja a mensagem no bot' : 'Responder pelo Telegram desligado', 'ok', 5000);
+      } catch (err) { e.target.checked = !want; toast(err.message, 'err', 7000); }
+      finally { e.target.disabled = false; loadTelegram(); }
+    });
+    // recibo de venda
+    on('btn-rc-save', 'click', () => rcSave(false));
+    on('btn-rc-preview', 'click', () => rcPreview(''));
+    on('btn-rc-reset', 'click', rcReset);
+    on('btn-rc-sig', 'click', () => $('rc-sig-file')?.click());
+    on('rc-sig-file', 'change', e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) rcPickSignature(f); });
+    on('btn-rc-sig-del', 'click', rcRemoveSignature);
+    on('btn-rc-test-pdf', 'click', () => { const id = ($('rc-test-order')?.value || '').replace(/\D/g, ''); if (!id) { toast('Digite o número do pedido', 'warn'); return; } rcPreview(id); });
+    on('btn-rc-test-send', 'click', rcSendTest);
+    on('rc-message', 'input', rcCount);
+    ['rc-body', 'rc-message', 'rc-title', 'rc-signer', 'rc-file'].forEach(id => on(id, 'focus', () => { state.rcFocus = id; }));
+    // catálogo
+    on('btn-cat-save', 'click', saveCatalogCfg);
     on('btn-tg-test', 'click', async () => {
       try { await api('/api/telegram/test', { method: 'POST' }); toast('Enviado — confira o Telegram', 'ok'); }
       catch (e) { toast(e.message, 'err'); }
@@ -2246,7 +2326,10 @@
 
   // ════════════ TELEGRAM ════════════
   const TG_ALERTS = [
-    ['new_question', 'Pergunta de comprador'],
+    ['new_question', 'Pergunta ou mensagem de comprador para você responder'],
+    ['ai_auto', 'IA respondeu sozinha'],
+    ['receipt', 'Recibo enviado (ou que não deu para enviar)'],
+    ['catalog', 'Catálogo: perdeu o 1º lugar / preço ajustado'],
     ['claim', 'Reclamação aberta'],
     ['token_fail', 'Falha ao renovar token'],
     ['rate_limit', 'Rate limit do ML'],
@@ -2277,6 +2360,14 @@
           box.appendChild(row);
         });
       }
+      const tw = $('tg-twoway');
+      const connected = !!(tg.enabled && tg.chat_id);
+      if (tw) { tw.checked = !!tg.two_way; tw.disabled = !connected; }
+      const tws = $('tg-twoway-status');
+      if (tws) tws.textContent = !connected ? 'Conecte o Telegram acima para usar.'
+        : !tg.two_way ? ''
+        : tg.hook && tg.hook.ok ? '✓ Ativo — responda as mensagens do bot para falar com os compradores.'
+        : `⚠ O Telegram não está entregando as respostas${tg.hook && tg.hook.last_error ? ` (${tg.hook.last_error})` : ''} — desligue e ligue de novo.`;
       const bk = $('tg-backup-info');
       if (bk) bk.textContent = tg.last_backup
         ? `📦 Último backup semanal enviado em ${new Date(Number(tg.last_backup)).toLocaleString('pt-BR')}`
@@ -2299,6 +2390,653 @@
       await api('/api/telegram', { method: 'POST', body: { alerts: state.tgAlerts } });
       toast('Alertas salvos', 'ok');
     } catch (e) { toast(e.message, 'err'); }
+  }
+
+  // ════════════ RECIBO DE VENDA ════════════
+  const RC_VARS = [
+    ['vendedor', 'seu nome'], ['doc_vendedor', 'seu CPF/CNPJ'], ['doc_vendedor_tipo', '"CPF" ou "CNPJ"'], ['cidade', 'sua cidade'],
+    ['pedido', 'nº do pedido'], ['data_venda', 'data da venda'], ['data_venda_extenso', 'data da venda por extenso'], ['data_hoje', 'hoje, por extenso'],
+    ['produto', 'título do anúncio'], ['variacao', 'cor, tamanho…'], ['quantidade', '01 (uma) unidade'], ['quantidade_numero', 'só o número'],
+    ['codigo_anuncio', 'MLB…'], ['sku', 'seu SKU'], ['valor', 'R$ 799,00'], ['valor_extenso', 'valor por extenso'], ['valor_unitario', 'preço unitário'],
+    ['forma_pagamento', 'Pix, cartão…'], ['comprador', 'nome ou razão social'], ['doc_comprador', 'CPF/CNPJ do comprador'], ['doc_comprador_tipo', '"CPF" ou "CNPJ"'],
+    ['ie_comprador', 'inscrição estadual'], ['apelido', 'apelido no ML'], ['primeiro_nome', 'primeiro nome'], ['garantia', '03 (três) meses'],
+    ['endereco', 'rua e número'], ['complemento', 'complemento/referência'], ['bairro', 'bairro'], ['cidade_entrega', 'cidade da entrega'],
+    ['uf', 'estado'], ['cep', 'CEP'], ['destinatario', 'quem recebe'],
+  ];
+  state.rc = null; state.rcFocus = 'rc-body';
+  const rcVal = (id, v) => { const e = $(id); if (e) { if (e.type === 'checkbox') e.checked = !!v; else e.value = v ?? ''; } };
+  async function loadReceipt() {
+    let rc;
+    try { rc = await api('/api/receipt/config'); } catch (e) { return; }
+    state.rc = rc;
+    rcVal('rc-enabled', rc.enabled); rcVal('rc-auto', rc.auto_on_request);
+    rcVal('rc-name', rc.seller_name); rcVal('rc-doc', rc.seller_doc); rcVal('rc-city', rc.city); rcVal('rc-warranty', rc.warranty_default);
+    rcVal('rc-message', rc.message); rcVal('rc-keywords', rc.keywords); rcVal('rc-title', rc.title); rcVal('rc-body', rc.body);
+    rcVal('rc-signer', rc.signer); rcVal('rc-file', rc.file_name); rcVal('rc-sigw', rc.sig_width || 220);
+    rcRenderSig(rc.has_sig ? rc.sig_preview : '');
+    rcCount();
+    const box = $('rc-vars');
+    if (box && !box.childElementCount) {
+      box.appendChild(el('span', { class: 'muted small' }, 'Variáveis: '));
+      RC_VARS.forEach(([k, d]) => box.appendChild(el('button', { class: 'rc-var', type: 'button', title: d, onclick: () => rcInsert(`{${k}}`) }, `{${k}}`)));
+    }
+  }
+  function rcRenderSig(src) {
+    const img = $('rc-sig-img'), none = $('rc-sig-none');
+    if (img) { img.classList.toggle('hidden', !src); if (src) img.src = src; else img.removeAttribute('src'); }
+    if (none) none.classList.toggle('hidden', !!src);
+    const del = $('btn-rc-sig-del'); if (del) del.disabled = !src;
+  }
+  function rcCount() {
+    const n = ($('rc-message')?.value || '').length, out = $('rc-message-count');
+    if (out) out.textContent = `(${n}/350)`;
+  }
+  // insert a variable where the cursor is (in the last field you clicked)
+  function rcInsert(t) {
+    const ta = $(state.rcFocus) || $('rc-body');
+    if (!ta) return;
+    const a = ta.selectionStart ?? ta.value.length, b = ta.selectionEnd ?? a;
+    ta.value = ta.value.slice(0, a) + t + ta.value.slice(b);
+    ta.focus(); try { ta.setSelectionRange(a + t.length, a + t.length); } catch { /* campo sem seleção */ }
+    if (ta.id === 'rc-message') rcCount();
+  }
+  function rcCollect() {
+    const v = id => $(id)?.value ?? '';
+    return { enabled: !!$('rc-enabled')?.checked, auto_on_request: !!$('rc-auto')?.checked, seller_name: v('rc-name').trim(), seller_doc: v('rc-doc').trim(),
+      city: v('rc-city').trim(), warranty_default: v('rc-warranty').trim(), message: v('rc-message'), keywords: v('rc-keywords'), title: v('rc-title'),
+      body: v('rc-body'), signer: v('rc-signer'), file_name: v('rc-file').trim(), sig_width: Number(v('rc-sigw')) || 220 };
+  }
+  async function rcSave(silent) {
+    const body = rcCollect();
+    if (body.enabled && !body.seller_name) { toast('Para ativar, preencha seu nome (ou a razão social)', 'warn'); return false; }
+    try {
+      await api('/api/receipt/config', { method: 'POST', body });
+      if (!silent) toast('Recibo salvo', 'ok');
+      return true;
+    } catch (e) { toast(e.message, 'err', 6000); return false; }
+  }
+  async function rcPreview(orderId) {
+    const out = $('rc-result');
+    if (out) out.textContent = 'Gerando o PDF…';
+    try {
+      const r = await apiFile('/api/receipt/preview', orderId ? { cfg: rcCollect(), order_id: orderId } : { cfg: rcCollect() });
+      openBlob(r.blob, r.file || 'recibo_venda.pdf');
+      if (out) out.textContent = r.message ? `Mensagem que vai junto: “${r.message}”` : '';
+    } catch (e) { if (out) out.textContent = ''; toast(e.message, 'err', 7000); }
+  }
+  async function rcSendTest() {
+    const id = ($('rc-test-order')?.value || '').replace(/\D/g, '');
+    if (!id) { toast('Digite o número do pedido', 'warn'); return; }
+    if (!await confirm('Enviar recibo', `O recibo do pedido ${id} vai para o comprador, no chat do Mercado Livre, com a mensagem padrão. O que está nesta tela é salvo antes.`, 'Enviar')) return;
+    if (!await rcSave(true)) return;
+    try {
+      const r = await api('/api/receipt/send', { method: 'POST', body: { order_id: id } });
+      toast(`Recibo enviado (pedido ${r.sent.join(', ')})`, 'ok', 5000);
+    } catch (e) { toast(e.message, 'err', 8000); }
+  }
+  async function rcReset() {
+    const d = state.rc?.defaults;
+    if (!d) return;
+    if (!await confirm('Restaurar modelo padrão', 'Título, texto, bloco da assinatura, nome do arquivo, mensagem e palavras voltam ao padrão (seus dados e a assinatura continuam). Só vale depois de Salvar.', 'Restaurar')) return;
+    rcVal('rc-title', d.title); rcVal('rc-body', state.rc.default_body || d.body); rcVal('rc-signer', d.signer); rcVal('rc-file', d.file_name);
+    rcVal('rc-message', d.message); rcVal('rc-keywords', d.keywords); rcCount();
+    toast('Modelo padrão restaurado — clique em Salvar recibo para valer', 'ok', 5000);
+  }
+  // any image → JPEG on a white background, at most 900 px wide
+  function rcToJpeg(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = () => reject(new Error('arquivo ilegível'));
+      fr.onload = () => {
+        const src = String(fr.result || '');
+        let ctx = null;
+        try { ctx = document.createElement('canvas').getContext('2d'); } catch { ctx = null; }
+        if (!ctx) { // without canvas, a JPEG goes as it is
+          if (/^data:image\/jpeg;base64,/.test(src)) resolve(src); else reject(new Error('use uma imagem JPG'));
+          return;
+        }
+        const img = new Image();
+        img.onerror = () => reject(new Error('formato de imagem não suportado'));
+        img.onload = () => {
+          const k = Math.min(1, 900 / (img.naturalWidth || 900));
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round((img.naturalWidth || 1) * k)); c.height = Math.max(1, Math.round((img.naturalHeight || 1) * k));
+          const g = c.getContext('2d');
+          g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+          resolve(c.toDataURL('image/jpeg', 0.9));
+        };
+        img.src = src;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+  async function rcPickSignature(file) {
+    if (file.size > 10e6) { toast('Imagem grande demais (máx. 10 MB)', 'warn'); return; }
+    let dataUrl;
+    try { dataUrl = await rcToJpeg(file); } catch (e) { toast('Não consegui ler a imagem: ' + e.message, 'err'); return; }
+    try {
+      await api('/api/receipt/signature', { method: 'POST', body: { image: dataUrl } });
+      rcRenderSig(dataUrl);
+      toast('Assinatura salva', 'ok');
+    } catch (e) { toast(e.message, 'err', 6000); }
+  }
+  async function rcRemoveSignature() {
+    if (!await confirm('Remover assinatura', 'O PDF passa a sair com uma linha para assinar à mão.', 'Remover', true)) return;
+    try { await api('/api/receipt/signature', { method: 'POST', body: { remove: true } }); rcRenderSig(''); toast('Assinatura removida', 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
+  }
+  // Recibo de um pedido: ver o PDF ou enviar ao comprador (Pedidos e Conversas)
+  function openReceiptModal(o) {
+    const orderId = String(o.order_id || ''), packId = String(o.pack_id || '');
+    const ref = orderId ? { order_id: orderId } : { pack_id: packId };
+    const label = orderId ? `pedido ${orderId}` : `conversa ${packId}`;
+    $('modal-title').textContent = 'Recibo de venda';
+    const body = el('div');
+    body.appendChild(el('p', {}, `${o.buyer ? o.buyer + ' — ' : ''}${label}`));
+    body.appendChild(el('p', { class: 'muted small' }, 'Usa o modelo salvo em Configurações → Recibo de venda. Os dados do comprador vêm do Mercado Livre agora.'));
+    if (state.rc && !state.rc.seller_name) body.appendChild(el('p', { class: 'cr-warn' }, 'Preencha seus dados em Configurações → Recibo de venda antes de enviar.'));
+    $('modal-body').innerHTML = ''; $('modal-body').appendChild(body);
+    $('modal-actions').innerHTML = '';
+    const close = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Fechar');
+    const view = el('button', { class: 'btn dark' }, '👁 Ver PDF');
+    view.onclick = async () => {
+      view.disabled = true;
+      try { const r = await apiFile('/api/receipt/preview', { ...ref, pack: !orderId }); openBlob(r.blob, r.file || 'recibo_venda.pdf'); }
+      catch (e) { toast(e.message, 'err', 7000); }
+      finally { view.disabled = false; }
+    };
+    const send = el('button', { class: 'btn green' }, '📤 Enviar ao comprador');
+    send.onclick = async () => {
+      send.disabled = true; send.textContent = 'Enviando…';
+      try {
+        const r = await api('/api/receipt/send', { method: 'POST', body: ref });
+        $('modal').classList.add('hidden');
+        toast(`Recibo enviado (pedido ${r.sent.join(', ')})`, 'ok', 5000);
+      } catch (e) { toast(e.message, 'err', 8000); send.disabled = false; send.textContent = '📤 Enviar ao comprador'; }
+    };
+    $('modal-actions').append(close, view, send);
+    $('modal').classList.remove('hidden');
+    if (!state.rc) loadReceipt();
+  }
+
+  // ════════════ CATÁLOGO ════════════
+  state.catInfo = {}; state.catSettings = {}; state.catCfg = null; state.catLoading = false;
+  async function loadCatalogCfg() {
+    try {
+      const c = await api('/api/catalog/config');
+      state.catCfg = c;
+      rcVal('cat-alert', c.alert); rcVal('cat-auto', c.auto_enabled); rcVal('cat-cooldown', c.cooldown_min); rcVal('cat-maxdrop', c.max_drop_pct);
+    } catch (e) { /* silent */ }
+  }
+  async function saveCatalogCfg() {
+    try {
+      const r = await api('/api/catalog/config', { method: 'POST', body: { alert: !!$('cat-alert')?.checked, auto_enabled: !!$('cat-auto')?.checked,
+        cooldown_min: Number($('cat-cooldown')?.value) || 30, max_drop_pct: Number($('cat-maxdrop')?.value) || 10 } });
+      state.catCfg = r.config;
+      toast('Catálogo salvo', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  const CAT_LABEL = { winning: ['done', '🏷 Ganhando'], sharing_first_place: ['sending', '🏷 Dividindo o 1º'], competing: ['fail', '🏷 Perdendo'], listed: ['pending', '🏷 Fora da disputa'] };
+  const CAT_REASON = { reputation_below_threshold: 'reputação abaixo do exigido', shipping_mode: 'forma de envio não aceita', item_paused: 'anúncio pausado',
+    item_not_opted_in: 'anúncio não participa do catálogo', winner_has_better_reputation: 'o vencedor tem reputação melhor' };
+  const catBrl = v => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function catBadge(p) {
+    const v = state.catInfo[p.id];
+    if (!v) return el('span', { class: 'tag cat', title: 'Anúncio de catálogo — clique em 🏷 para ver o preço para ganhar' }, '🏷 Catálogo');
+    if (v.error) return el('span', { class: 'tag pending', title: v.error }, '🏷 Catálogo (sem dados)');
+    const [cls, txt] = CAT_LABEL[v.status] || ['pending', '🏷 Catálogo'];
+    const extra = v.status === 'competing' && v.price_to_win ? ` · ganhar: ${catBrl(v.price_to_win)}` : '';
+    return el('span', { class: `tag ${cls}`, title: 'Situação no catálogo' }, txt + extra);
+  }
+  // price to win for the catalog listings (20 per request)
+  async function catLoad(ids, fresh) {
+    if (state.catLoading || !ids.length) return;
+    state.catLoading = true; catBar();
+    try {
+      for (let i = 0; i < ids.length; i += 20) {
+        const r = await api(`/api/catalog?ids=${ids.slice(i, i + 20).join(',')}${fresh ? '&fresh=1' : ''}`);
+        Object.assign(state.catInfo, r.items || {}); Object.assign(state.catSettings, r.settings || {});
+        if (r.config) state.catCfg = r.config;
+        if (r.rate_limited) { toast('O Mercado Livre pediu uma pausa — parte dos anúncios fica para depois', 'warn', 6000); break; }
+        if (i + 20 < ids.length) await new Promise(res => setTimeout(res, 400));
+      }
+    } catch (e) { toast(e.message, 'err', 6000); }
+    finally { state.catLoading = false; renderProducts(); }
+  }
+  function catBar() {
+    const bar = $('prod-cat-bar');
+    if (!bar) return;
+    const cat = state.products.filter(p => p.catalog_listing);
+    bar.classList.toggle('hidden', !cat.length);
+    if (!cat.length) return;
+    const n = s => cat.filter(p => state.catInfo[p.id]?.status === s).length;
+    const known = cat.filter(p => state.catInfo[p.id] && !state.catInfo[p.id].error).length;
+    bar.innerHTML = '';
+    bar.appendChild(el('span', {}, `🏷 ${cat.length} anúncio(s) de catálogo`));
+    if (known) bar.appendChild(el('span', { class: 'muted small' }, ` · ${n('winning')} ganhando · ${n('competing')} perdendo${n('sharing_first_place') ? ` · ${n('sharing_first_place')} dividindo` : ''}${known < cat.length ? ` · ${cat.length - known} sem verificar` : ''}`));
+    const b = el('button', { class: 'btn ghost sm' }, state.catLoading ? 'Verificando…' : '↻ Ver preço para ganhar');
+    b.disabled = state.catLoading;
+    b.onclick = () => catLoad(cat.map(p => p.id), true);
+    bar.appendChild(b);
+    bar.appendChild(el('button', { class: 'btn dark sm', onclick: () => switchScreen('catalogo') }, '🏷 Abrir a tela Catálogo'));
+  }
+  async function openCatalog(p) {
+    $('modal-title').textContent = '🏷 Catálogo';
+    const body = el('div', { class: 'cat-modal' });
+    body.appendChild(el('div', { class: 'muted small' }, `${p.title || p.id} · ${p.id}`));
+    const info = el('div', { class: 'cat-info' }, el('div', { class: 'muted small' }, 'Consultando o Mercado Livre…'));
+    body.appendChild(info);
+    const s = state.catSettings[p.id] || { cat_min: p.cat_min || 0, cat_auto: !!p.cat_auto };
+    const minIn = el('input', { type: 'number', min: '0', step: '0.01', placeholder: 'Ex.: 1200,00' });
+    if (s.cat_min) minIn.value = String(s.cat_min);
+    const autoCb = el('input', { type: 'checkbox' }); autoCb.checked = !!s.cat_auto;
+    const form = el('div', { class: 'form-grid', style: 'margin-top:12px' },
+      el('label', {}, 'Preço mínimo — nunca vender abaixo de (R$)', minIn),
+      el('label', { class: 'switch-row' }, autoCb, el('span', {}, 'Ajustar sozinho para ganhar (só baixa até o necessário, nunca abaixo do mínimo)')));
+    body.appendChild(form);
+    const note = el('div', { class: 'muted small' });
+    if (!state.catCfg?.auto_enabled) note.textContent = 'O ajuste automático está desligado em Configurações → Catálogo (os avisos continuam).';
+    body.appendChild(note);
+    $('modal-body').innerHTML = ''; $('modal-body').appendChild(body);
+    $('modal-actions').innerHTML = '';
+    const close = el('button', { class: 'btn ghost', onclick: () => $('modal').classList.add('hidden') }, 'Fechar');
+    const save = el('button', { class: 'btn blue' }, 'Salvar');
+    const apply = el('button', { class: 'btn green hidden' }, 'Aplicar');
+    save.onclick = async () => {
+      const min = Number(String(minIn.value).replace(',', '.')) || 0;
+      if (autoCb.checked && !(min > 0)) { toast('Para ajustar sozinho, defina o preço mínimo', 'warn'); return; }
+      save.disabled = true;
+      try {
+        const r = await api('/api/product', { method: 'POST', body: { item_id: p.id, title: p.title || '', cat_min: min > 0 ? min : '', cat_auto: autoCb.checked } });
+        state.catSettings[p.id] = { cat_min: Number(r.product?.cat_min) || 0, cat_auto: !!r.product?.cat_auto };
+        p.cat_min = state.catSettings[p.id].cat_min; p.cat_auto = state.catSettings[p.id].cat_auto;
+        toast('Catálogo do anúncio salvo', 'ok'); renderProducts();
+      } catch (e) { toast(e.message, 'err'); }
+      finally { save.disabled = false; }
+    };
+    $('modal-actions').append(close, save, apply);
+    $('modal').classList.remove('hidden');
+    let v;
+    try {
+      const r = await api(`/api/catalog?ids=${p.id}&fresh=1`);
+      v = r.items?.[p.id]; Object.assign(state.catSettings, r.settings || {}); if (r.config) state.catCfg = r.config;
+      if (v) state.catInfo[p.id] = v;
+    } catch (e) { info.innerHTML = ''; info.appendChild(el('div', { class: 'cr-warn err' }, e.message)); return; }
+    info.innerHTML = '';
+    if (!v || v.error) { info.appendChild(el('div', { class: 'cr-warn' }, `Sem dados do catálogo para este anúncio${v?.error ? `: ${v.error}` : ''}.`)); return; }
+    const head = { winning: '✅ Você está ganhando o 1º lugar', sharing_first_place: '🤝 Você divide o 1º lugar', competing: '⚠ Você não está em 1º lugar', listed: '⏸ Fora da disputa' }[v.status] || v.status;
+    info.appendChild(el('div', { class: 'cat-head' }, head));
+    const grid = el('div', { class: 'cat-grid-info' });
+    const cell = (k, val) => grid.appendChild(el('div', {}, el('div', { class: 'muted small' }, k), el('strong', {}, val)));
+    cell('Seu preço', catBrl(v.current_price));
+    if (v.price_to_win) cell('Preço para ganhar', catBrl(v.price_to_win));
+    if (v.winner) cell('1º lugar agora', `${catBrl(v.winner.price)}${v.winner.item_id === p.id ? ' (você)' : ''}`);
+    info.appendChild(grid);
+    const vs = { maximum: 'a maior parte', medium: 'uma parte', minimum: 'poucas' }[v.visit_share];
+    if (vs) info.appendChild(el('div', { class: 'muted small' }, `Você recebe ${vs} das visitas desta página de produto.`));
+    if (v.reason?.length) info.appendChild(el('div', { class: 'cr-warn' }, `Motivo: ${v.reason.map(x => CAT_REASON[x] || x).join(', ')}`));
+    if (v.boosts?.length) {
+      const ul = el('ul', { class: 'cat-boosts' });
+      v.boosts.forEach(b => ul.appendChild(el('li', {}, `${{ boosted: '✓', not_boosted: '✗', opportunity: '💡', not_apply: '—' }[b.status] || '•'} ${b.description || b.id}`)));
+      info.appendChild(el('div', { class: 'muted small', style: 'margin-top:8px' }, 'O que pesa para ganhar (além do preço):'));
+      info.appendChild(ul);
+    }
+    if (typeof p.price === 'number' && Math.abs(p.price - v.current_price) > 0.009)
+      info.appendChild(el('div', { class: 'muted small' }, `O preço cadastrado é ${catBrl(p.price)}; o Mercado Livre considera ${catBrl(v.current_price)} (promoção ou desconto ativo). Ajuste a promoção no Mercado Livre se for o caso.`));
+    const min = Number(state.catSettings[p.id]?.cat_min) || 0;
+    if (v.status === 'competing' && v.price_to_win > 0) {
+      if (min && v.price_to_win < min - 0.001) info.appendChild(el('div', { class: 'cr-warn' }, `O preço para ganhar fica abaixo do seu mínimo (${catBrl(min)}).`));
+      else {
+        apply.textContent = `Aplicar ${catBrl(v.price_to_win)}`; apply.classList.remove('hidden');
+        apply.onclick = async () => {
+          if (!await confirm('Mudar o preço', `O anúncio passa de ${catBrl(v.current_price)} para ${catBrl(v.price_to_win)} no Mercado Livre.`, 'Aplicar')) return;
+          try {
+            const r = await api('/api/catalog/apply', { method: 'POST', body: { item_id: p.id, price: v.price_to_win } });
+            p.price = r.price; delete state.catInfo[p.id];
+            toast(`Preço atualizado: ${catBrl(r.price)}`, 'ok'); renderProducts();
+            catLoad([p.id], true);
+          } catch (e) { toast(e.message, 'err', 7000); }
+        };
+      }
+    }
+  }
+
+  // ════════════ PERGUNTAS DOS ANÚNCIOS ════════════
+  async function loadQuestions() {
+    const box = $('q-list');
+    if (!box) return;
+    box.innerHTML = '<div class="muted small">Carregando…</div>';
+    try {
+      const r = await api('/api/questions');
+      renderQuestions(r.questions || []);
+    } catch (e) {
+      box.innerHTML = '';
+      box.appendChild(el('div', { class: 'muted small' }, e.status === 429 ? e.message : `Não consegui carregar as perguntas: ${e.message}`));
+    }
+  }
+  function renderQuestions(qs) {
+    const box = $('q-list');
+    box.innerHTML = '';
+    if (!qs.length) { box.appendChild(el('div', { class: 'muted small' }, 'Nenhuma pergunta esperando resposta.')); return; }
+    qs.forEach(q => {
+      const card = el('div', { class: 'q-card' });
+      const head = el('div', { class: 'q-head' });
+      if (/^https:\/\//.test(q.thumbnail || '')) head.appendChild(el('img', { src: q.thumbnail, alt: '', class: 'q-thumb', loading: 'lazy' }));
+      head.appendChild(el('div', {}, el('div', { class: 'q-item' }, q.item_title || q.item_id), el('div', { class: 'muted small' }, `${q.item_id} · ${formatDate(q.date)}`)));
+      card.appendChild(head);
+      card.appendChild(el('div', { class: 'q-text' }, `“${q.text}”`));
+      if (q.suggestion) card.appendChild(el('div', { class: 'muted small' }, `🤖 Sugestão da IA${q.reason ? ` (${q.reason})` : ''} — revise e responda:`));
+      const ta = el('textarea', { rows: '3', maxlength: '2000', placeholder: 'Sua resposta (fica pública no anúncio — sem links, telefone ou e-mail)' });
+      ta.value = q.suggestion || '';
+      card.appendChild(ta);
+      const acts = el('div', { class: 'q-acts' });
+      const sug = el('button', { class: 'btn dark sm' }, '✨ Sugerir com IA');
+      sug.onclick = async () => {
+        sug.disabled = true; sug.textContent = 'Pensando…';
+        try {
+          const r = await api('/api/questions/suggest', { method: 'POST', body: { question_id: q.id } });
+          if (r.reply) ta.value = r.reply; else toast(`A IA não sugeriu: ${r.reason || 'precisa de você'}`, 'warn', 6000);
+        } catch (e) { toast(e.message, 'err', 7000); }
+        finally { sug.disabled = false; sug.textContent = '✨ Sugerir com IA'; }
+      };
+      const send = el('button', { class: 'btn green sm' }, 'Responder');
+      send.onclick = async () => {
+        const text = ta.value.trim();
+        if (!text) { toast('Escreva a resposta', 'warn'); return; }
+        send.disabled = true;
+        try {
+          await api('/api/questions/answer', { method: 'POST', body: { question_id: q.id, text } });
+          toast('Pergunta respondida', 'ok');
+          card.remove();
+          if (!box.querySelector('.q-card')) renderQuestions([]);
+        } catch (e) { toast(e.message, 'err', 7000); send.disabled = false; }
+      };
+      acts.append(sug, send);
+      if (/^https:\/\//.test(q.permalink || '')) acts.appendChild(el('a', { class: 'btn ghost sm', href: q.permalink, target: '_blank', rel: 'noopener' }, 'Ver anúncio ↗'));
+      card.appendChild(acts);
+      box.appendChild(card);
+    });
+  }
+
+  // ════════════ TELA CATÁLOGO (ganhadores e pesquisa) ════════════
+  state.catTabName = 'mine'; state.catMineAt = 0; state.catMineLoading = false; state.catDetail = null; state.catDetailFrom = null;
+  const REP_COLOR = { '5_green': ['#00a650', 'verde'], '4_light_green': ['#7ac943', 'verde-clara'], '3_yellow': ['#f5c400', 'amarela'], '2_orange': ['#ff8c00', 'laranja'],
+    '1_red': ['#e5352b', 'vermelha'], GREEN: ['#00a650', 'verde'], LIGHT_GREEN: ['#7ac943', 'verde-clara'], YELLOW: ['#f5c400', 'amarela'], ORANGE: ['#ff8c00', 'laranja'], RED: ['#e5352b', 'vermelha'] };
+  const POWER = { platinum: 'MercadoLíder Platinum', gold: 'MercadoLíder Gold', silver: 'MercadoLíder' };
+  function sellerTag(s, level) {
+    const box = el('span', { class: 'cat-seller' });
+    const lv = REP_COLOR[(s && s.level) || level || ''];
+    if (lv) box.appendChild(el('span', { class: 'rep-dot', title: `Reputação ${lv[1]}`, style: `background:${lv[0]}` }));
+    box.appendChild(el('strong', {}, s?.nickname || 'vendedor'));
+    if (s?.power && POWER[s.power]) box.appendChild(el('span', { class: 'cat-chip medal' }, POWER[s.power]));
+    return box;
+  }
+  function perkChips(x) {
+    const box = el('span', { class: 'cat-perks' });
+    const add = (t, cls, title) => box.appendChild(el('span', { class: `cat-chip ${cls || ''}`, title: title || t }, t));
+    if (x.full) add('⚡ Full', 'full', 'Enviado pelo Full (estoque no Mercado Livre)');
+    if (x.free_shipping) add('Frete grátis', 'ok');
+    if (x.premium) add('Parcela sem juros', 'ok', 'Anúncio Premium: parcelamento sem juros');
+    if (x.official) add('Loja oficial', '');
+    if (x.original_price) add('Em promoção', 'warn', `De ${catBrl(x.original_price)}`);
+    if (x.condition && x.condition !== 'new') add(x.condition === 'used' ? 'Usado' : 'Recondicionado', 'warn');
+    return box;
+  }
+  function catTab(name) {
+    state.catTabName = name;
+    $$('[data-cat-tab]').forEach(b => b.classList.toggle('active', b.dataset.catTab === name));
+    $('catm')?.classList.toggle('hidden', name !== 'mine');
+    $('cats')?.classList.toggle('hidden', name !== 'search');
+    if (name === 'mine') initCatalogScreen();
+  }
+  async function initCatalogScreen() {
+    if (state.catTabName !== 'mine') return;
+    if (!state.products.length) { catMineRender(); await loadProducts({ noCatalog: true }); }
+    if (Date.now() - state.catMineAt > 600000) catMineLoad(false); else catMineRender();
+  }
+  // your catalog listings: price to win + who is winning (20 per request)
+  async function catMineLoad(fresh) {
+    if (state.catMineLoading) return;
+    const ids = state.products.filter(p => p.catalog_listing).map(p => p.id);
+    if (!ids.length) { state.catMineAt = Date.now(); catMineRender(); return; }
+    state.catMineLoading = true; catMineRender();
+    try {
+      for (let i = 0; i < ids.length; i += 20) {
+        const r = await api(`/api/catalog?ids=${ids.slice(i, i + 20).join(',')}&winners=1${fresh ? '&fresh=1' : ''}`);
+        Object.assign(state.catInfo, r.items || {}); Object.assign(state.catSettings, r.settings || {});
+        if (r.config) state.catCfg = r.config;
+        if (r.rate_limited) { toast('O Mercado Livre pediu uma pausa — parte dos anúncios fica para depois', 'warn', 6000); break; }
+        catMineRender();
+        if (i + 20 < ids.length) await new Promise(res => setTimeout(res, 400));
+      }
+      state.catMineAt = Date.now();
+    } catch (e) { toast(e.message, 'err', 6000); }
+    finally { state.catMineLoading = false; catMineRender(); }
+  }
+  const CAT_ORDER = { competing: 0, sharing_first_place: 1, listed: 2, winning: 3 };
+  function catMineRender() {
+    const list = $('catm-list');
+    if (!list) return;
+    const cat = state.products.filter(p => p.catalog_listing);
+    const q = ($('catm-search')?.value || '').toLowerCase().trim(), f = $('catm-filter')?.value || 'all';
+    const st = p => state.catInfo[p.id]?.status || '';
+    const n = k => cat.filter(p => st(p) === k).length;
+    const sum = $('catm-summary');
+    if (sum) {
+      sum.innerHTML = '';
+      if (cat.length) {
+        const chip = (t, k, cls) => { const b = el('button', { class: `catm-sum ${cls} ${f === k ? 'on' : ''}`, type: 'button' }, t); b.onclick = () => { $('catm-filter').value = f === k ? 'all' : k; catMineRender(); }; sum.appendChild(b); };
+        chip(`⚠ ${n('competing')} perdendo`, 'competing', 'bad');
+        chip(`✅ ${n('winning')} ganhando`, 'winning', 'good');
+        if (n('sharing_first_place')) chip(`🤝 ${n('sharing_first_place')} dividindo`, 'sharing_first_place', 'mid');
+        if (n('listed')) chip(`⏸ ${n('listed')} fora da disputa`, 'listed', 'mid');
+        const unknown = cat.filter(p => !state.catInfo[p.id]).length;
+        if (state.catMineLoading) sum.appendChild(el('span', { class: 'muted small' }, 'Consultando o Mercado Livre…'));
+        else if (unknown) sum.appendChild(el('span', { class: 'muted small' }, `${unknown} sem verificar`));
+      }
+    }
+    list.innerHTML = '';
+    if (!cat.length) {
+      list.appendChild(el('div', { class: 'cat-empty muted' }, state.products.length
+        ? 'Nenhum dos seus anúncios está em catálogo. Use "Pesquisar catálogo" para ver quem ganha um produto antes de entrar nele.'
+        : 'Carregando seus anúncios…'));
+      const c = $('catm-count'); if (c) c.textContent = '';
+      return;
+    }
+    const rows = cat.filter(p => (f === 'all' || st(p) === f) && (!q || (p.title || '').toLowerCase().includes(q) || p.id.toLowerCase().includes(q)))
+      .sort((a, b) => (CAT_ORDER[st(a)] ?? 4) - (CAT_ORDER[st(b)] ?? 4) || (a.title || '').localeCompare(b.title || ''));
+    const c = $('catm-count'); if (c) c.textContent = `${rows.length} de ${cat.length}`;
+    if (!rows.length) { list.appendChild(el('div', { class: 'cat-empty muted' }, 'Nada com esse filtro.')); return; }
+    rows.forEach(p => list.appendChild(catMineCard(p)));
+  }
+  function catMineCard(p) {
+    const v = state.catInfo[p.id];
+    const s = state.catSettings[p.id] || { cat_min: p.cat_min || 0, cat_auto: !!p.cat_auto };
+    const card = el('div', { class: `catm-card ${v?.status || ''}`, 'data-pid': p.id });
+    const head = el('div', { class: 'catm-head' });
+    if (/^https:\/\//.test(p.thumbnail || '')) head.appendChild(el('img', { src: p.thumbnail, alt: '', class: 'q-thumb', loading: 'lazy' }));
+    head.appendChild(el('div', { class: 'catm-title' }, el('div', { class: 'q-item' }, p.title || p.id), el('div', { class: 'muted small' }, `${p.id}${p.listing_status && p.listing_status !== 'active' ? ' · ' + p.listing_status : ''}`)));
+    head.appendChild(catBadge(p));
+    card.appendChild(head);
+    const grid = el('div', { class: 'catm-grid' });
+    const cell = (k, val, extra) => { const d = el('div', {}, el('div', { class: 'muted small' }, k), el('strong', {}, val)); if (extra) d.appendChild(extra); grid.appendChild(d); };
+    if (!v) cell('Situação', state.catMineLoading ? 'consultando…' : 'não verificado');
+    else if (v.error) cell('Situação', `sem dados (${v.error})`);
+    else {
+      cell('Seu preço', catBrl(v.current_price));
+      if (v.status === 'competing' && v.price_to_win) cell('Preço para ganhar', catBrl(v.price_to_win), el('div', { class: 'muted small' }, `${catBrl(v.current_price - v.price_to_win)} abaixo do atual`));
+      const w = v.winner;
+      if (w) {
+        const who = el('div', { class: 'catm-who' });
+        if (w.mine) who.appendChild(el('span', { class: 'cat-chip ok' }, 'é você'));
+        else { if (w.seller) who.appendChild(sellerTag(w.seller)); who.appendChild(perkChips(w)); }
+        cell('1º lugar agora', catBrl(w.price), who);
+      }
+      if (v.reason?.length) cell('Por que está fora', v.reason.map(x => CAT_REASON[x] || x).join(', '));
+    }
+    card.appendChild(grid);
+    const foot = el('div', { class: 'catm-foot' });
+    foot.appendChild(el('span', { class: 'muted small' }, s.cat_min ? `Mínimo ${catBrl(s.cat_min)}${s.cat_auto ? ' · ajuste automático ligado' : ''}` : 'Sem preço mínimo definido'));
+    const acts = el('div', { class: 'catm-acts' });
+    const pid = p.catalog_product_id || v?.catalog_product_id;
+    if (pid) acts.appendChild(el('button', { class: 'btn dark sm', onclick: () => catOpenProduct(pid, { from: 'mine' }) }, '👥 Ver concorrentes'));
+    const min = Number(s.cat_min) || 0;
+    if (v?.status === 'competing' && v.price_to_win > 0 && !(min && v.price_to_win < min - 0.001)) {
+      acts.appendChild(el('button', { class: 'btn green sm', onclick: () => catApply(p, v.current_price, v.price_to_win) }, `Aplicar ${catBrl(v.price_to_win)}`));
+    }
+    acts.appendChild(el('button', { class: 'btn ghost sm', title: 'Preço mínimo e ajuste automático', onclick: () => openCatalog(p) }, '⚙ Mínimo'));
+    foot.appendChild(acts);
+    card.appendChild(foot);
+    return card;
+  }
+  async function catApply(p, from, to, after) {
+    if (!await confirm('Mudar o preço', `${p.title || p.id}: de ${catBrl(from)} para ${catBrl(to)} no Mercado Livre.`, 'Aplicar')) return;
+    try {
+      const r = await api('/api/catalog/apply', { method: 'POST', body: { item_id: p.id, price: to } });
+      p.price = r.price;
+      toast(`Preço atualizado: ${catBrl(r.price)}`, 'ok');
+      const x = await api(`/api/catalog?ids=${p.id}&winners=1&fresh=1`).catch(() => null);
+      if (x?.items) Object.assign(state.catInfo, x.items);
+      catMineRender();
+      if (after) after();
+    } catch (e) { toast(e.message, 'err', 7000); }
+  }
+  // research: a link, a code or a product name
+  async function catSearch() {
+    const q = ($('cats-q')?.value || '').trim();
+    const res = $('cats-results'), det = $('catd');
+    if (!q) { toast('Cole um link ou digite o produto', 'warn'); return; }
+    res.innerHTML = ''; res.appendChild(el('div', { class: 'muted small' }, 'Procurando…'));
+    det.innerHTML = ''; state.catDetailFrom = null;
+    try {
+      const r = await api(`/api/catalog/find?q=${encodeURIComponent(q)}`);
+      res.innerHTML = '';
+      if (r.product_id) { catOpenProduct(r.product_id); return; }
+      if (!r.results?.length) { res.appendChild(el('div', { class: 'cat-empty muted' }, 'Nenhum catálogo encontrado com essas palavras. Tente o nome do modelo ou cole o link do produto.')); return; }
+      res.appendChild(el('div', { class: 'muted small' }, `${r.total > r.results.length ? `${r.results.length} de ${r.total}` : r.results.length} catálogo(s) — escolha um:`));
+      r.results.forEach(x => {
+        const b = el('button', { class: 'cats-item', type: 'button', onclick: () => catOpenProduct(x.id) });
+        if (/^https:\/\//.test(x.thumbnail || '')) b.appendChild(el('img', { src: x.thumbnail, alt: '', class: 'q-thumb', loading: 'lazy' }));
+        b.appendChild(el('span', { class: 'cats-name' }, x.name, el('span', { class: 'muted small' }, ` ${x.id}${x.variants ? ` · ${x.variants} variações` : ''}`)));
+        res.appendChild(b);
+      });
+    } catch (e) { res.innerHTML = ''; res.appendChild(el('div', { class: 'cr-warn err' }, e.message)); }
+  }
+  async function catOpenProduct(id, opts = {}) {
+    if (opts.from) state.catDetailFrom = opts.from;
+    if (state.catTabName !== 'search') {
+      state.catTabName = 'search';
+      $$('[data-cat-tab]').forEach(b => b.classList.toggle('active', b.dataset.catTab === 'search'));
+      $('catm')?.classList.add('hidden'); $('cats')?.classList.remove('hidden');
+      if (opts.from === 'mine') $('cats-results').innerHTML = '';
+    }
+    const det = $('catd');
+    det.innerHTML = ''; det.appendChild(el('div', { class: 'muted small' }, 'Consultando o catálogo no Mercado Livre…'));
+    try { det.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* sem rolagem */ }
+    try {
+      const v = await api(`/api/catalog/product?id=${encodeURIComponent(id)}${opts.fresh ? '&fresh=1' : ''}`);
+      state.catDetail = v;
+      catRenderDetail(v);
+    } catch (e) { det.innerHTML = ''; det.appendChild(el('div', { class: 'cr-warn err' }, e.message)); }
+  }
+  function catRenderDetail(v) {
+    const det = $('catd');
+    det.innerHTML = '';
+    const top = el('div', { class: 'catd-top' });
+    if (state.catDetailFrom === 'mine') top.appendChild(el('button', { class: 'btn ghost sm', onclick: () => catTab('mine') }, '← Meus catálogos'));
+    top.appendChild(el('button', { class: 'btn ghost sm', onclick: () => catOpenProduct(v.id, { fresh: true }) }, '↻ Atualizar'));
+    if (/^https:\/\//.test(v.permalink || '')) top.appendChild(el('a', { class: 'btn ghost sm', href: v.permalink, target: '_blank', rel: 'noopener' }, 'Abrir no Mercado Livre ↗'));
+    det.appendChild(top);
+    const head = el('div', { class: 'catd-head' });
+    if (/^https:\/\//.test(v.thumbnail || '')) head.appendChild(el('img', { src: v.thumbnail, alt: '', class: 'catd-img', loading: 'lazy' }));
+    head.appendChild(el('div', {}, el('h2', {}, v.name), el('div', { class: 'muted small' }, `Catálogo ${v.id}${v.total ? ` · ${v.total} anúncio(s) disputando` : ''}`)));
+    det.appendChild(head);
+    if (v.rate_limited) det.appendChild(el('div', { class: 'cr-warn' }, 'O Mercado Livre pediu uma pausa no meio da consulta — alguns dados podem faltar. Atualize em alguns minutos.'));
+    // a product family: choose the variant (each one is its own catalog page)
+    if (v.children?.length) {
+      det.appendChild(el('p', {}, 'Este produto tem variações — cada uma tem a sua disputa. Escolha:'));
+      const box = el('div', { class: 'cats-results' });
+      v.children.forEach(ch => box.appendChild(el('button', { class: 'cats-item', type: 'button', onclick: () => catOpenProduct(ch.id, {}) },
+        el('span', { class: 'cats-name' }, ch.name, el('span', { class: 'muted small' }, ch.winner_price ? ` · 1º lugar ${catBrl(ch.winner_price)}` : ' · sem ganhador agora')))));
+      if (v.children_total > v.children.length) box.appendChild(el('div', { class: 'muted small' }, `Mostrando ${v.children.length} de ${v.children_total} variações.`));
+      det.appendChild(box);
+      return;
+    }
+    const w = v.winner, sellers = v.sellers || {};
+    // your listings in this catalog (exact price to win from Mercado Livre)
+    (v.mine || []).forEach(mi => {
+      const b = el('div', { class: `catd-mine ${mi.status}` });
+      const head2 = { winning: '✅ Você está ganhando este catálogo', sharing_first_place: '🤝 Você divide o 1º lugar', competing: '⚠ Você está neste catálogo, mas não em 1º', listed: '⏸ Seu anúncio está fora da disputa' }[mi.status] || 'Você está neste catálogo';
+      b.appendChild(el('strong', {}, head2));
+      b.appendChild(el('div', {}, `Seu anúncio ${mi.item_id}: ${catBrl(mi.price)}${mi.price_to_win && mi.status === 'competing' ? ` · preço exato para ganhar (calculado pelo ML): ${catBrl(mi.price_to_win)}` : ''}`));
+      if (mi.reason?.length) b.appendChild(el('div', { class: 'muted small' }, `Motivo: ${mi.reason.map(x => CAT_REASON[x] || x).join(', ')}`));
+      const opp = (mi.boosts || []).filter(x => x.status === 'opportunity');
+      if (opp.length) b.appendChild(el('div', { class: 'muted small' }, `💡 Ajudaria a ganhar: ${opp.map(x => x.description || x.id).join('; ')}`));
+      if (mi.status === 'competing' && mi.price_to_win > 0 && !(mi.cat_min && mi.price_to_win < mi.cat_min - 0.001)) {
+        const prod = state.products.find(p => p.id === mi.item_id) || { id: mi.item_id, title: v.name };
+        b.appendChild(el('button', { class: 'btn green sm', onclick: () => catApply(prod, mi.price, mi.price_to_win, () => catOpenProduct(v.id, { fresh: true })) }, `Aplicar ${catBrl(mi.price_to_win)}`));
+      } else if (mi.status === 'competing' && mi.cat_min && mi.price_to_win < mi.cat_min) b.appendChild(el('div', { class: 'cr-warn' }, `O preço para ganhar fica abaixo do seu mínimo (${catBrl(mi.cat_min)}).`));
+      det.appendChild(b);
+    });
+    // winner
+    const wb = el('div', { class: 'catd-winner' });
+    wb.appendChild(el('div', { class: 'catd-label' }, '🥇 1º lugar agora'));
+    if (!w) wb.appendChild(el('div', {}, 'Ninguém está ganhando este catálogo neste momento (a disputa pode estar começando).'));
+    else {
+      wb.appendChild(el('div', { class: 'catd-price' }, catBrl(w.price), w.original_price ? el('s', { class: 'muted small' }, ` ${catBrl(w.original_price)}`) : ''));
+      const who = el('div', { class: 'catm-who' });
+      if (w.mine) who.appendChild(el('span', { class: 'cat-chip ok' }, 'é você'));
+      else who.appendChild(sellerTag(sellers[w.seller_id], w.level));
+      who.appendChild(perkChips(w));
+      wb.appendChild(who);
+      const s = sellers[w.seller_id];
+      const facts = [s?.sales ? `${s.sales.toLocaleString('pt-BR')} vendas no ML` : '', w.sold ? `${Number(w.sold).toLocaleString('pt-BR')} vendidos neste anúncio` : '', w.available != null ? `estoque ${w.available}` : ''].filter(Boolean);
+      if (facts.length) wb.appendChild(el('div', { class: 'muted small' }, facts.join(' · ')));
+      if (!w.mine && !(v.mine || []).length) {
+        const sug = el('div', { class: 'catd-sug' });
+        sug.appendChild(el('div', {}, el('strong', {}, `Para disputar: preço abaixo de ${catBrl(w.price)}`)));
+        const has = [w.full ? 'Full' : '', w.free_shipping ? 'frete grátis' : '', w.premium ? 'parcelamento sem juros (Premium)' : '', s?.power ? POWER[s.power] : ''].filter(Boolean);
+        sug.appendChild(el('div', { class: 'muted small' }, has.length
+          ? `O 1º lugar tem ${has.join(', ')}. Sem isso, você provavelmente precisa ficar mais abaixo — o Mercado Livre pesa preço, reputação, forma de envio e parcelamento.`
+          : 'O Mercado Livre pesa preço, reputação, forma de envio e parcelamento.'));
+        sug.appendChild(el('div', { class: 'muted small' }, 'O preço exato para ganhar só aparece depois que você tem um anúncio neste catálogo (ele vem para "Meus catálogos").'));
+        const fee = el('div', { class: 'catd-fee muted small' }, v.category_id ? 'Calculando quanto sobra…' : '');
+        sug.appendChild(fee);
+        wb.appendChild(sug);
+        if (v.category_id) catFees(fee, Math.max(0.01, Math.round((w.price - 0.01) * 100) / 100), v.category_id);
+      }
+    }
+    if (v.range && v.range.min && v.range.max && v.range.min !== v.range.max) wb.appendChild(el('div', { class: 'muted small' }, `Faixa de preço do 1º lugar informada pelo ML: ${catBrl(v.range.min)} a ${catBrl(v.range.max)}`));
+    det.appendChild(wb);
+    // everyone competing
+    if (v.competitors?.length) {
+      det.appendChild(el('h3', { class: 'catd-sub' }, `Todos que disputam (${v.total || v.competitors.length}) — do menor preço para o maior`));
+      const wrap = el('div', { class: 'table-wrap cat-table-wrap' });
+      const table = el('table', { class: 'table cat-table' });
+      table.appendChild(el('thead', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, 'Preço'), el('th', {}, 'Vendedor'), el('th', {}, 'Vantagens'), el('th', {}, 'Anúncio'))));
+      const tb = el('tbody');
+      v.competitors.forEach((x, i) => {
+        const isW = w && x.item_id === w.item_id;
+        const tr = el('tr', { class: `${isW ? 'win' : ''} ${x.mine ? 'mine' : ''}` });
+        tr.appendChild(el('td', {}, isW ? '🥇' : String(i + 1)));
+        tr.appendChild(el('td', {}, el('strong', {}, catBrl(x.price)), x.original_price ? el('s', { class: 'muted small' }, ` ${catBrl(x.original_price)}`) : ''));
+        tr.appendChild(el('td', {}, x.mine ? el('span', { class: 'cat-chip ok' }, 'você') : sellerTag(sellers[x.seller_id], x.level)));
+        tr.appendChild(el('td', {}, perkChips(x)));
+        tr.appendChild(el('td', {}, el('a', { href: `https://produto.mercadolivre.com.br/${x.item_id.replace(/^MLB/, 'MLB-')}-_JM`, target: '_blank', rel: 'noopener' }, x.item_id)));
+        tb.appendChild(tr);
+      });
+      table.appendChild(tb); wrap.appendChild(table); det.appendChild(wrap);
+      if (v.total > v.competitors.length) det.appendChild(el('div', { class: 'muted small' }, `Mostrando os ${v.competitors.length} primeiros.`));
+    } else if (w) det.appendChild(el('div', { class: 'muted small' }, 'O Mercado Livre não informou a lista de concorrentes deste catálogo.'));
+  }
+  // what is left after Mercado Livre's fee at a price (Clássico / Premium)
+  async function catFees(box, price, cat) {
+    try {
+      const r = await api(`/api/create/fees?price=${price.toFixed(2)}&category_id=${encodeURIComponent(cat)}`);
+      const c = r.find(x => x.listing_type_id === 'gold_special'), p = r.find(x => x.listing_type_id === 'gold_pro');
+      const parts = [c ? `~${catBrl(c.net)} no Clássico` : '', p ? `~${catBrl(p.net)} no Premium` : ''].filter(Boolean);
+      box.textContent = parts.length ? `A ${catBrl(price)} você receberia ${parts.join(' ou ')} (tarifa do ML; antes de impostos, frete e custo do produto).` : '';
+    } catch (e) { box.textContent = ''; }
   }
 
   // ════════════ CHAVES DE PRODUTO ════════════
@@ -2571,6 +3309,9 @@
       const tplBtn = el('button', { class: 'btn dark' }, '📋 Enviar template');
       tplBtn.addEventListener('click', () => openTemplatePicker(convo));
       acts.appendChild(tplBtn);
+      const rcBtn = el('button', { class: 'btn dark', title: 'Recibo de venda (PDF) no chat' }, '📄 Recibo');
+      rcBtn.addEventListener('click', () => openReceiptModal({ order_id: convo.order_id, pack_id: convo.pack_id, buyer: convo.buyer }));
+      acts.appendChild(rcBtn);
       acts.appendChild(sendBtn);
       composer.appendChild(acts);
       threadEl.appendChild(composer);
@@ -2690,6 +3431,8 @@
       const cfg = await api('/api/ai/config');
       if ($('ai-enabled')) $('ai-enabled').checked = !!cfg.enabled;
       if ($('ai-autoreply')) $('ai-autoreply').checked = !!cfg.auto_reply;
+      if ($('ai-q-enabled')) $('ai-q-enabled').checked = !!cfg.q_enabled;
+      if ($('ai-q-auto')) $('ai-q-auto').checked = !!cfg.q_auto;
       if ($('ai-rules')) $('ai-rules').value = cfg.rules || '';
       if ($('ai-provider')) $('ai-provider').value = cfg.provider || 'openai';
       if ($('ai-baseurl')) $('ai-baseurl').value = cfg.base_url || '';
@@ -2738,6 +3481,8 @@
     const body = {
       enabled: $('ai-enabled')?.checked || false,
       auto_reply: $('ai-autoreply')?.checked || false,
+      q_enabled: $('ai-q-enabled')?.checked || false,
+      q_auto: $('ai-q-auto')?.checked || false,
       rules: $('ai-rules')?.value || '',
       faq: state.aiFaq.filter(f => (f.q || '').trim() && (f.a || '').trim()),
       provider: $('ai-provider')?.value || 'openai',
@@ -3966,7 +4711,7 @@
   const fmtDay = d => d ? d.split('-').reverse().join('/') : '';
   const fold = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
-  state.an = { range: '30', uf: '', region: '', cache: {}, cur: null, prev: null, per: null, geo: { b: {}, s: {} }, claims: {}, log: [], busy: false };
+  state.an = { range: '30', uf: '', region: '', lt: '', item: '', payg: '', rules: null, cache: {}, cur: null, prev: null, per: null, geo: { b: {}, s: {} }, claims: {}, log: [], busy: false };
 
   function anStatus(t) { const s = $('an-status'); if (s) s.textContent = t || ''; }
 
@@ -4083,8 +4828,11 @@
   }
   async function anClaims(orders) {
     let c; try { c = JSON.parse(localStorage.getItem(CLAIM_KEY) || '{}') || {}; } catch { c = {}; }
-    const ids = [...new Set(orders.flatMap(o => o.md || []))].filter(id => !c[id] || c[id].status !== 'closed').slice(0, 120);
+    // closed claims are kept in this browser; open or never-seen ones are asked again (up to 300 per analysis)
+    const ids = [...new Set(orders.flatMap(o => o.md || []))].filter(id => !c[id] || c[id].status !== 'closed').slice(0, 300);
     for (let i = 0; i < ids.length; i += 30) {
+      if (i) await new Promise(res => setTimeout(res, 250));
+      anStatus(`Consultando reclamações: ${intf(Math.min(i + 30, ids.length))} de ${intf(ids.length)}…`);
       try {
         const r = await api('/api/analytics/claims', { method: 'POST', body: { ids: ids.slice(i, i + 30) } });
         for (const [id, v] of Object.entries(r.claims || {})) if (v) c[id] = v;
@@ -4110,6 +4858,7 @@
     const units = (o.it || []).reduce((s, x) => s + (x.q || 1), 0);
     return {
       paid, cancelledAfterPay, unpaid: !paid && !cancelledAfterPay, claim, chargeback, units,
+      inMediation: pays.some(p => p.s === 'in_mediation'),
       base: paid || cancelledAfterPay,
       gross: paid ? Number(o.tot) || 0 : 0,
       fees: paid ? (o.it || []).reduce((s, x) => s + (x.f || 0) * (x.q || 1), 0) : 0,
@@ -4122,34 +4871,86 @@
     const by = { buyer: 'comprador', seller: 'você (vendedor)', mediator: 'Mercado Livre', fraud: 'Mercado Livre (fraude)' }[cx.by] || (cx.by || 'não informado');
     return { by, why: cx.ds || cx.code || 'sem descrição' };
   }
+
+  // ── o que entra no faturamento ──
+  // Cancelled and unpaid orders never count. On top of that, these paid sales
+  // can be left out (your choice, saved in this browser):
+  const AN_RULES_KEY = 'mlas_an_rules';
+  const AN_RULES_DEFAULT = { refund: true, claim: true, chargeback: true, fraud: true, transit: false };
+  const AN_RULE_LABEL = { refund: 'devolvidos ou estornados', claim: 'com reclamação aberta ou perdida', chargeback: 'contestação no cartão', fraud: 'risco de fraude', transit: 'ainda não entregues' };
+  function anLoadRules() {
+    try { return { ...AN_RULES_DEFAULT, ...(JSON.parse(localStorage.getItem(AN_RULES_KEY) || '{}') || {}) }; }
+    catch { return { ...AN_RULES_DEFAULT }; }
+  }
+  const anAnyRule = () => Object.values(state.an.rules || {}).some(Boolean);
+  // a claim keeps the sale in the revenue only once it's closed in your favor
+  function anClaimSettled(o, claims) {
+    return (o.md || []).every(id => { const cl = claims && claims[id]; return !!cl && cl.status === 'closed' && /respondent/.test(String(cl.benefited || '')); });
+  }
+  // → { in: counts in the revenue?, amount, fees, why (rule that left it out), partial (refund deducted) }
+  function anRevenueOf(o, c, claims) {
+    if (!c.paid) return { in: false, amount: 0, fees: 0, why: '' };
+    const R = state.an.rules || AN_RULES_DEFAULT, tags = o.tags || [];
+    const out = why => ({ in: false, amount: 0, fees: 0, why });
+    if (R.chargeback && c.chargeback) return out('chargeback');
+    if (R.refund && c.refunds > 0 && c.refunds >= c.gross - 0.01) return out('refund');
+    if (R.claim && (c.inMediation || (c.claim && !anClaimSettled(o, claims)))) return out('claim');
+    if (R.fraud && tags.includes('fraud_risk_detected')) return out('fraud');
+    if (R.transit && o.sh && !tags.includes('delivered')) return out('transit');
+    if (R.refund && c.refunds > 0) return { in: true, amount: c.gross - c.refunds, fees: c.fees, why: '', partial: c.refunds };
+    return { in: true, amount: c.gross, fees: c.fees, why: '' };
+  }
+
+  // ── outros recortes: formato, anúncio, forma de pagamento ──
+  const PAY_GROUP = { credit_card: 'card', debit_card: 'card', prepaid_card: 'card', bank_transfer: 'pix', pix: 'pix', ticket: 'boleto', atm: 'boleto',
+    account_money: 'account', digital_wallet: 'account', digital_currency: 'credit', consumer_credits: 'credit' };
+  const PAY_LABEL = { card: 'Cartão', pix: 'Pix', boleto: 'Boleto', account: 'Saldo no Mercado Pago', credit: 'Mercado Crédito (parcelado sem cartão)', other: 'Outras formas' };
+  function anPayGroup(o) {
+    const pays = o.pay || [];
+    const p = pays.find(x => x.s === 'approved') || pays[0] || {};
+    return PAY_GROUP[p.m] || 'other';
+  }
+
   function anAggregate(orders, g, claims) {
-    const A = { orders: 0, base: 0, paid: 0, gross: 0, fees: 0, refunds: 0, units: 0, cancel: 0, unpaid: 0, claims: 0, chargebacks: 0,
+    // paid = sales that count in the revenue (with the rules above); paidAll = every paid order
+    const A = { orders: 0, base: 0, paid: 0, paidAll: 0, gross: 0, grossAll: 0, fees: 0, refunds: 0, units: 0, cancel: 0, unpaid: 0, claims: 0, chargebacks: 0,
       problems: 0, located: 0, multiUnit: 0, buyers: new Map(), cancelBy: {}, cancelWhy: {}, claimWhy: {}, byDay: new Map(),
       byUF: new Map(), byCity: new Map(), byProd: new Map(), heat: Array.from({ length: 7 }, () => new Array(24).fill(0)),
-      lt: { gold_special: { n: 0, gross: 0, fees: 0 }, gold_pro: { n: 0, gross: 0, fees: 0 } }, unknownGeo: { base: 0, gross: 0, paid: 0, problems: 0 } };
+      lt: { gold_special: { n: 0, gross: 0, fees: 0 }, gold_pro: { n: 0, gross: 0, fees: 0 } }, unknownGeo: { base: 0, gross: 0, paid: 0, problems: 0 },
+      out: { n: 0, amount: 0, by: {}, partialN: 0, partial: 0 } };
     const bump = (map, key, init) => { let v = map.get(key); if (!v) { v = init(); map.set(key, v); } return v; };
     const placeInit = () => ({ base: 0, paid: 0, gross: 0, problems: 0, cancel: 0, claims: 0, buyers: new Set() });
+    const refundsDeducted = !!(state.an.rules || AN_RULES_DEFAULT).refund;
     A.byMonth = new Map();
     for (const o of orders) {
       const c = anClassify(o);
+      const rv = anRevenueOf(o, c, claims);
       A.orders++;
       // month by month: every order Mercado Livre returned, for checking against its own reports
-      const mo = bump(A.byMonth, brDayOf(o.d).slice(0, 7), () => ({ orders: 0, paid: 0, cancel: 0, unpaid: 0, gross: 0, units: 0 }));
+      const mo = bump(A.byMonth, brDayOf(o.d).slice(0, 7), () => ({ orders: 0, paid: 0, sold: 0, out: 0, cancel: 0, unpaid: 0, gross: 0, units: 0 }));
       mo.orders++;
-      if (c.paid) { mo.paid++; mo.gross += c.gross; mo.units += c.units; }
+      if (c.paid) { mo.paid++; if (rv.in) { mo.sold++; mo.gross += rv.amount; mo.units += c.units; } else mo.out++; }
       else if (c.cancelledAfterPay) mo.cancel++;
       else mo.unpaid++;
       if (c.unpaid) { A.unpaid++; continue; }
       A.base++;
+      if (c.paid) { A.paidAll++; A.grossAll += c.gross; }
+      if (c.paid && !rv.in) {
+        A.out.n++; A.out.amount += c.gross;
+        const b = A.out.by[rv.why] = A.out.by[rv.why] || { n: 0, amount: 0 };
+        b.n++; b.amount += c.gross;
+      }
+      if (rv.partial) { A.out.partialN++; A.out.partial += rv.partial; }
       const geo = g ? geoOf(o, g) : { s: '', c: '' };
-      if (c.paid) {
-        A.paid++; A.gross += c.gross; A.fees += c.fees; A.refunds += c.refunds; A.units += c.units;
+      if (rv.in) {
+        A.paid++; A.gross += rv.amount; A.fees += rv.fees; A.units += c.units;
+        if (!refundsDeducted) A.refunds += c.refunds;
         if (c.units > 1) A.multiUnit++;
         const day = brDayOf(o.d);
-        const dd = bump(A.byDay, day, () => ({ gross: 0, n: 0 })); dd.gross += c.gross; dd.n++;
+        const dd = bump(A.byDay, day, () => ({ gross: 0, n: 0 })); dd.gross += rv.amount; dd.n++;
         A.heat[brWdOf(o.d)][brHourOf(o.d)]++;
         const it0 = (o.it || [])[0] || {};
-        const lt = A.lt[it0.lt]; if (lt) { lt.n++; lt.gross += c.gross; lt.fees += c.fees; }
+        const lt = A.lt[it0.lt]; if (lt) { lt.n++; lt.gross += rv.amount; lt.fees += rv.fees; }
       }
       if (c.cancelledAfterPay) {
         A.cancel++;
@@ -4165,22 +4966,22 @@
       if (c.problem) A.problems++;
       // comprador
       const bu = bump(A.buyers, o.b || o.n, () => ({ nick: o.n, paid: 0, problems: 0, gross: 0, uf: geo.s }));
-      if (c.paid) { bu.paid++; bu.gross += c.gross; }
+      if (rv.in) { bu.paid++; bu.gross += rv.amount; }
       if (c.problem) bu.problems++;
       // lugar
       if (geo.s) {
         A.located++;
         for (const [map, key] of [[A.byUF, geo.s], [A.byCity, geo.s + '|' + (geo.c || '?')]]) {
           const p = bump(map, key, placeInit);
-          p.base++; if (c.paid) { p.paid++; p.gross += c.gross; }
+          p.base++; if (rv.in) { p.paid++; p.gross += rv.amount; }
           if (c.problem) p.problems++; if (c.cancelledAfterPay) p.cancel++; if (c.claim) p.claims++;
           p.buyers.add(o.b);
         }
-      } else { A.unknownGeo.base++; A.unknownGeo.gross += c.gross; if (c.paid) A.unknownGeo.paid++; if (c.problem) A.unknownGeo.problems++; }
+      } else { A.unknownGeo.base++; A.unknownGeo.gross += rv.amount; if (rv.in) A.unknownGeo.paid++; if (c.problem) A.unknownGeo.problems++; }
       // produto
       for (const it of (o.it || []).slice(0, 1)) {
         const p = bump(A.byProd, it.id, () => ({ title: it.t, base: 0, paid: 0, units: 0, gross: 0, fees: 0, problems: 0, premium: 0 }));
-        p.base++; if (c.paid) { p.paid++; p.units += c.units; p.gross += c.gross; p.fees += c.fees; if (it.lt === 'gold_pro') p.premium++; }
+        p.base++; if (rv.in) { p.paid++; p.units += c.units; p.gross += rv.amount; p.fees += rv.fees; if (it.lt === 'gold_pro') p.premium++; }
         if (c.problem) p.problems++;
       }
     }
@@ -4192,16 +4993,25 @@
     return A;
   }
 
-  // ── filtros (região / estado / cidade) — re-renderiza sem buscar de novo ──
-  function anFilterOrders(orders) {
-    const { uf, region } = state.an;
-    if (!uf && !region) return orders;
+  // ── filtros: região/estado (precisa da localização) e formato/anúncio/pagamento ──
+  // Re-renders without fetching again. `geo: false` = everything except place
+  // (the previous period has no locations, but can follow the other filters).
+  function anFilterOrders(orders, { geo = true } = {}) {
+    const { uf, region, lt, item, payg } = state.an;
+    if (!uf && !region && !lt && !item && !payg) return orders;
     const g = state.an.geo;
     return orders.filter(o => {
-      const s = geoOf(o, g).s;
-      if (!s) return false;
-      if (uf) return s === uf;
-      return UF_INFO[s] && UF_INFO[s][1] === region;
+      const it0 = (o.it || [])[0] || {};
+      if (lt && it0.lt !== lt) return false;
+      if (item && !(o.it || []).some(x => x.id === item)) return false;
+      if (payg && anPayGroup(o) !== payg) return false;
+      if (geo && (uf || region)) {
+        const s = geoOf(o, g).s;
+        if (!s) return false;
+        if (uf) return s === uf;
+        return !!(UF_INFO[s] && UF_INFO[s][1] === region);
+      }
+      return true;
     });
   }
 
@@ -4246,7 +5056,9 @@
       if (state.an.pending) return; // another period was chosen meanwhile — it runs next (data stays cached)
       anStatus('Localizando compradores…');
       state.an.geo = await anLocate(cur.orders);
-      if (cur.orders.some(o => (o.md || []).length)) { anStatus('Consultando motivos das reclamações…'); state.an.claims = await anClaims(cur.orders); }
+      // claims of both periods: whether a claim was won by you decides if that sale stays in the revenue
+      const withClaims = prev ? [...cur.orders, ...prev.orders] : cur.orders;
+      if (withClaims.some(o => (o.md || []).length)) { anStatus('Consultando reclamações…'); state.an.claims = await anClaims(withClaims); }
       try { state.an.log = await api('/api/orders'); } catch { state.an.log = []; }
       Object.assign(state.an, { cur, prev, per });
       anSaveLast();
@@ -4314,9 +5126,39 @@
         .forEach(([k, v]) => ufSel.appendChild(el('option', { value: k }, `${v[0]} (${k})`)));
       ufSel.value = state.an.uf;
     }
+    const ltSel = $('an-lt');
+    if (ltSel && !ltSel.options.length) {
+      [['', 'Todos os formatos'], ['gold_special', 'Clássico'], ['gold_pro', 'Premium']].forEach(([v, t]) => ltSel.appendChild(el('option', { value: v }, t)));
+    }
+    if (ltSel) ltSel.value = state.an.lt;
+    const paySel = $('an-pay');
+    if (paySel && !paySel.options.length) {
+      paySel.appendChild(el('option', { value: '' }, 'Todas as formas de pagamento'));
+      Object.entries(PAY_LABEL).forEach(([v, t]) => paySel.appendChild(el('option', { value: v }, t)));
+    }
+    if (paySel) paySel.value = state.an.payg;
+    anSyncItemOptions();
+    if (!state.an.rules) state.an.rules = anLoadRules();
+    $$('[data-an-rule]').forEach(cb => { cb.checked = !!state.an.rules[cb.dataset.anRule]; });
+  }
+  // listings sold in the period, most sold first
+  function anSyncItemOptions() {
+    const sel = $('an-item');
+    if (!sel) return;
+    const count = new Map();
+    for (const o of (state.an.cur?.orders || [])) for (const it of (o.it || []).slice(0, 1)) {
+      const c = count.get(it.id) || { n: 0, t: it.t }; c.n++; count.set(it.id, c);
+    }
+    if (state.an.item && !count.has(state.an.item)) state.an.item = '';
+    sel.innerHTML = '';
+    sel.appendChild(el('option', { value: '' }, count.size ? `Todos os anúncios (${intf(count.size)})` : 'Todos os anúncios'));
+    [...count.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 300)
+      .forEach(([id, c]) => sel.appendChild(el('option', { value: id }, `${String(c.t || id).slice(0, 60)} — ${intf(c.n)} pedido(s)`)));
+    sel.value = state.an.item;
   }
 
   function wireAnalyticsHandlers() {
+    if (!state.an.rules) state.an.rules = anLoadRules();
     $$('[data-an-range]').forEach(b => b.addEventListener('click', () => {
       state.an.range = b.dataset.anRange;
       anSyncFilterUI();
@@ -4338,7 +5180,15 @@
     bind('an-uf', 'change', e => { state.an.uf = e.target.value; anRender(); });
     bind('an-city-search', 'input', () => { clearTimeout(state.an.searchT); state.an.searchT = setTimeout(() => anRenderGeoTable(state.an.A), 250); });
     bind('btn-an-csv', 'click', anExportCSV);
-    bind('btn-an-clear-filter', 'click', () => { state.an.uf = ''; state.an.region = ''; anSyncFilterUI(); anRender(); });
+    bind('an-lt', 'change', e => { state.an.lt = e.target.value; anRender(); });
+    bind('an-item', 'change', e => { state.an.item = e.target.value; anRender(); });
+    bind('an-pay', 'change', e => { state.an.payg = e.target.value; anRender(); });
+    $$('[data-an-rule]').forEach(cb => cb.addEventListener('change', () => {
+      state.an.rules = { ...(state.an.rules || anLoadRules()), [cb.dataset.anRule]: cb.checked };
+      try { localStorage.setItem(AN_RULES_KEY, JSON.stringify(state.an.rules)); } catch { /* só nesta sessão */ }
+      anRender();
+    }));
+    bind('btn-an-clear-filter', 'click', () => { Object.assign(state.an, { uf: '', region: '', lt: '', item: '', payg: '' }); anSyncFilterUI(); anRender(); });
     let rt;
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (state.currentScreen === 'estatisticas' && state.an.A) anRenderRevenue(state.an.A); }, 200); });
   }
@@ -4347,9 +5197,12 @@
   function anRender() {
     const s = state.an;
     if (!s.cur) return;
+    if (!s.rules) s.rules = anLoadRules();
+    anSyncItemOptions();
     const slice = anFilterOrders(s.cur.orders);
     const A = anAggregate(slice, s.geo, s.claims);
-    const filtered = !!(s.uf || s.region);
+    const filtered = !!(s.uf || s.region); // place filters: the previous period has no locations
+    const sliced = !!(s.lt || s.item || s.payg);
     // Comparison: never against incomplete data, and when the period ends
     // today, the previous one is cut at the same point of its last day
     // (comparing 15 hours of today with 24 hours of a past day reads as a fall).
@@ -4358,14 +5211,14 @@
     if (s.prev && !filtered) {
       if (s.prev.partial || s.cur.partial) s.cmp.why = 'Sem comparação: um dos períodos veio incompleto (o Mercado Livre pediu uma pausa) — clique em Atualizar.';
       else {
-        let prevOrders = s.prev.orders;
+        let prevOrders = anFilterOrders(s.prev.orders, { geo: false });
         if (s.per.to === brDayOf(s.cur.at)) {
           const elapsed = s.cur.at - Date.parse(`${s.per.from}T00:00:00-03:00`);
           const limit = Date.parse(`${s.per.prevFrom}T00:00:00-03:00`) + elapsed;
           prevOrders = prevOrders.filter(o => o.d <= limit);
           s.cmp.cutAt = s.cur.at;
         }
-        P = anAggregate(prevOrders, null, null);
+        P = anAggregate(prevOrders, null, s.claims);
       }
     }
     s.A = A; s.P = P;
@@ -4373,9 +5226,15 @@
     $('an-results')?.classList.toggle('hidden', A.orders === 0);
     const fl = $('an-filter-label');
     if (fl) {
-      fl.textContent = filtered ? `Mostrando: ${s.uf ? UF_INFO[s.uf][0] : s.region} · pedidos sem localização ficam de fora` : '';
-      $('btn-an-clear-filter')?.classList.toggle('hidden', !filtered);
+      const parts = [];
+      if (s.uf || s.region) parts.push(s.uf ? UF_INFO[s.uf][0] : s.region);
+      if (s.lt) parts.push(s.lt === 'gold_pro' ? 'Premium' : 'Clássico');
+      if (s.item) parts.push(`anúncio ${s.item}`);
+      if (s.payg) parts.push(PAY_LABEL[s.payg] || s.payg);
+      fl.textContent = parts.length ? `Mostrando: ${parts.join(' · ')}${filtered ? ' · pedidos sem localização ficam de fora' : ''}` : '';
+      $('btn-an-clear-filter')?.classList.toggle('hidden', !parts.length);
     }
+    void sliced;
     anStatus(`${intf(s.cur.orders.length)} pedido(s) de ${fmtDay(s.per.from)} a ${fmtDay(s.per.to)} · dados de ${brDateTime(s.cur.at).slice(0, 5)}, ${brDateTime(s.cur.at).slice(11)}${s.cur.partial ? ' · ⚠ parcial: ' + s.cur.partial : ''}${s.prev?.partial ? ' · ⚠ período anterior incompleto' : ''}`);
     if (!A.orders) return;
     anRenderKPIs(A, P);
@@ -4404,8 +5263,11 @@
     const box = $('an-kpis'); if (!box) return;
     box.innerHTML = '';
     const cancelRate = A.rate(A.cancel), claimRate = A.rate(A.claims);
+    const ruled = anAnyRule();
+    const outTxt = A.out.n ? ` · ${intf(A.out.n)} fora do faturamento (${brl(A.out.amount)})` : '';
     const tiles = [
-      { label: 'Faturamento bruto', value: brl(A.gross), delta: P && anDelta(A.gross, P.gross), hero: true, sub: `${intf(A.paid)} pedido(s) pago(s)` },
+      { label: ruled ? 'Faturamento — vendas concretizadas' : 'Faturamento bruto — todas as vendas pagas', value: brl(A.gross), delta: P && anDelta(A.gross, P.gross), hero: true,
+        sub: `${intf(A.paid)} venda(s)${outTxt}` },
       { label: 'Líquido estimado', value: brl(A.net), delta: P && anDelta(A.net, P.net), sub: `tarifas ${brl(A.fees)}${A.refunds ? ` · estornos ${brl(A.refunds)}` : ''}` },
       { label: 'Ticket médio', value: brl(A.ticket), delta: P && anDelta(A.ticket, P.ticket), sub: `${intf(A.units)} unidade(s)` },
       { label: 'Compradores', value: intf(A.uniqueBuyers), delta: P && anDelta(A.uniqueBuyers, P.uniqueBuyers), sub: A.uniqueBuyers ? `${pctf(A.repeatBuyers / A.uniqueBuyers, 0)} compraram mais de 1 vez` : '' },
@@ -4427,7 +5289,18 @@
       : cmp.why ? ' ' + cmp.why
       : !per.cmpOk && $('an-compare')?.checked ? ' Sem comparação: o período anterior passaria de 12 meses atrás.' : '';
     const cmpTxt = P ? `▲▼ = comparação com ${fmtDay(per.prevFrom)}–${fmtDay(per.prevTo)}${cmp.cutAt ? `, com o último dia contado só até as ${brDateTime(cmp.cutAt).slice(11)} (o mesmo horário de hoje)` : ''}. ` : '';
-    if (note) note.textContent = cmpTxt + 'Líquido = bruto − tarifas do ML − estornos; não inclui impostos.' + why;
+    if (note) note.textContent = cmpTxt + (ruled ? 'Líquido = faturamento − tarifas do ML; não inclui impostos.' : 'Líquido = bruto − tarifas do ML − estornos; não inclui impostos.') + why;
+    // what the revenue rules left out, so the number can always be checked
+    const ob = $('an-out');
+    if (ob) {
+      ob.innerHTML = '';
+      const by = Object.entries(A.out.by).sort((a, b) => b[1].amount - a[1].amount);
+      const parts = by.map(([k, v]) => `${intf(v.n)} ${AN_RULE_LABEL[k] || k} (${brl(v.amount)})`);
+      if (A.out.partialN) parts.push(`reembolsos parciais descontados de ${intf(A.out.partialN)} venda(s) (${brl(A.out.partial)})`);
+      ob.append(el('strong', {}, ruled ? 'Fora do faturamento: ' : 'Nenhuma venda paga tirada do faturamento. '),
+        el('span', {}, ruled ? (parts.length ? parts.join(' · ') + '.' : 'nada neste período.') : ''),
+        el('span', { class: 'muted' }, ` Cancelados (${intf(A.cancel)}) e não pagos (${intf(A.unpaid)}) nunca entram. Faturamento sem nenhum filtro: ${brl(A.grossAll)} em ${intf(A.paidAll)} pedido(s) pago(s).`));
+    }
   }
 
   // tooltip único (valor primeiro, rótulo depois), em hover e foco
@@ -4491,22 +5364,22 @@
       const [y, mm] = m.split('-').map(Number);
       m = mm === 12 ? `${y + 1}-01` : `${y}-${String(mm + 1).padStart(2, '0')}`;
     }
-    const tot = { orders: 0, paid: 0, cancel: 0, gross: 0 };
+    const tot = { orders: 0, paid: 0, sold: 0, out: 0, cancel: 0, gross: 0 };
     const rows = months.map(m => {
-      const d = A.byMonth.get(m) || { orders: 0, paid: 0, cancel: 0, gross: 0 };
-      tot.orders += d.orders; tot.paid += d.paid; tot.cancel += d.cancel; tot.gross += d.gross;
+      const d = A.byMonth.get(m) || { orders: 0, paid: 0, sold: 0, out: 0, cancel: 0, gross: 0 };
+      tot.orders += d.orders; tot.paid += d.paid; tot.sold += d.sold; tot.out += d.out; tot.cancel += d.cancel; tot.gross += d.gross;
       const [y, mm] = m.split('-');
       const lastDay = new Date(Date.UTC(Number(y), Number(mm), 0)).getUTCDate();
       const inProgress = per.to === brDayOf(state.an.cur?.at || Date.now()); // the last day is still running
       const partial = (m === per.from.slice(0, 7) && per.from.slice(8) !== '01') || (m === per.to.slice(0, 7) && (Number(per.to.slice(8)) < lastDay || inProgress));
-      return [`${MONTHS[Number(mm) - 1]}/${y}${partial ? ' (parcial)' : ''}`, intf(d.orders), intf(d.paid), intf(d.cancel), brl(d.gross), d.paid ? brl(d.gross / d.paid) : '—'];
+      return [`${MONTHS[Number(mm) - 1]}/${y}${partial ? ' (parcial)' : ''}`, intf(d.orders), intf(d.paid), intf(d.cancel), intf(d.out), brl(d.gross), d.sold ? brl(d.gross / d.sold) : '—'];
     });
-    rows.push(['Total', intf(tot.orders), intf(tot.paid), intf(tot.cancel), brl(tot.gross), tot.paid ? brl(tot.gross / tot.paid) : '—']);
+    rows.push(['Total', intf(tot.orders), intf(tot.paid), intf(tot.cancel), intf(tot.out), brl(tot.gross), tot.sold ? brl(tot.gross / tot.sold) : '—']);
     box.appendChild(el('div', { class: 'an-sub', style: 'margin-top:16px' }, 'Mês a mês'));
-    box.appendChild(anTable(['Mês', 'Pedidos encontrados', 'Pagos', 'Cancelados após pagar', 'Faturamento', 'Ticket médio'], rows));
+    box.appendChild(anTable(['Mês', 'Pedidos encontrados', 'Pagos', 'Cancelados após pagar', 'Pagos fora do faturamento', 'Faturamento', 'Ticket médio'], rows));
     box.querySelector('tbody tr:last-child')?.classList.add('an-total');
     box.appendChild(el('div', { class: 'muted small', style: 'margin-top:6px' },
-      'Pedidos encontrados = tudo o que o Mercado Livre devolveu no mês (pagos, cancelados e não pagos). Para conferir, compare com Vendas no Mercado Livre filtrando o mesmo mês. "(parcial)" = o período não cobre o mês inteiro.'));
+      'Pedidos encontrados = tudo o que o Mercado Livre devolveu no mês (pagos, cancelados e não pagos). "Pagos fora do faturamento" = vendas pagas tiradas pelos filtros de faturamento (devolvidas, com reclamação…). Para conferir, compare com Vendas no Mercado Livre filtrando o mesmo mês. "(parcial)" = o período não cobre o mês inteiro.'));
   }
 
   function anRenderRevenue(A) {
@@ -4790,12 +5663,16 @@
     const s = state.an;
     if (!s.cur) { toast('Faça uma análise primeiro', 'warn'); return; }
     const q = csvCell;
-    const head = ['pedido', 'data', 'status', 'comprador', 'anuncio', 'titulo', 'tipo', 'unidades', 'total', 'tarifas', 'uf', 'cidade', 'cancelado_apos_pagar', 'reclamacao', 'motivo'];
+    const head = ['pedido', 'data', 'status', 'comprador', 'anuncio', 'titulo', 'tipo', 'pagamento', 'unidades', 'total', 'tarifas', 'reembolsado',
+      'no_faturamento', 'valor_no_faturamento', 'por_que_fora', 'uf', 'cidade', 'cancelado_apos_pagar', 'reclamacao', 'motivo'];
+    const money = v => Number(v || 0).toFixed(2).replace('.', ',');
     const rows = anFilterOrders(s.cur.orders).map(o => {
-      const c = anClassify(o), g = geoOf(o, s.geo), it = (o.it || [])[0] || {};
+      const c = anClassify(o), g = geoOf(o, s.geo), it = (o.it || [])[0] || {}, rv = anRevenueOf(o, c, s.claims);
       const motivo = c.claim ? o.md.map(id => s.claims[id]?.reason || '').filter(Boolean).join(' / ') : (c.cancelledAfterPay ? anCancelReason(o).why : '');
-      return [o.id, brDateTime(o.d), o.st, o.n, it.id, it.t, it.lt === 'gold_pro' ? 'Premium' : 'Clássico', c.units,
-        String(o.tot).replace('.', ','), String(c.fees.toFixed(2)).replace('.', ','), g.s, g.c, c.cancelledAfterPay ? 'sim' : '', c.claim ? 'sim' : '', motivo].map(q).join(';');
+      const why = rv.in ? '' : c.paid ? (AN_RULE_LABEL[rv.why] || rv.why) : c.cancelledAfterPay ? 'cancelado' : 'não pago';
+      return [o.id, brDateTime(o.d), o.st, o.n, it.id, it.t, it.lt === 'gold_pro' ? 'Premium' : 'Clássico', PAY_LABEL[anPayGroup(o)] || '', c.units,
+        money(o.tot), money(c.fees), money(c.refunds), rv.in ? 'sim' : 'não', money(rv.amount), why,
+        g.s, g.c, c.cancelledAfterPay ? 'sim' : '', c.claim ? 'sim' : '', motivo].map(q).join(';');
     });
     const blob = new Blob(['﻿' + [head.join(';'), ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');

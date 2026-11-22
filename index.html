@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <meta name="theme-color" content="#0f0f10">
 <title>ML Auto Sender</title>
-<link rel="stylesheet" href="style.css?v=6291">
+<link rel="stylesheet" href="style.css?v=6310">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2330d158' d='M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -41,6 +41,7 @@
     <nav class="nav">
       <button class="nav-btn active" data-screen="dashboard"><span class="nav-icon">⊞</span><span>Dashboard</span></button>
       <button class="nav-btn" data-screen="produtos"><span class="nav-icon">▦</span><span>Produtos</span></button>
+      <button class="nav-btn" data-screen="catalogo"><span class="nav-icon">🏷</span><span>Catálogo</span></button>
       <button class="nav-btn" data-screen="criar"><span class="nav-icon">➕</span><span>Criar Anúncio</span></button>
       <button class="nav-btn" data-screen="mensagens"><span class="nav-icon">✉</span><span>Mensagens</span></button>
       <button class="nav-btn" data-screen="pedidos"><span class="nav-icon">⊙</span><span>Pedidos</span></button>
@@ -136,10 +137,13 @@
           <option value="active">Anúncios ativos</option>
           <option value="paused">Anúncios pausados</option>
           <option value="low">Estoque baixo (≤5)</option>
+          <option value="catalog">Catálogo (todos)</option>
+          <option value="catalog_losing">Catálogo — perdendo o 1º lugar</option>
         </select>
         <button class="btn ghost" id="btn-prod-csv-export">↓ CSV</button><button class="btn ghost" id="btn-prod-csv-import">↑ Importar CSV</button><input type="file" id="prod-csv-file" accept=".csv,text/csv" style="display:none"><button class="btn dark" id="btn-loadprods">↻ Carregar</button><button class="btn green" data-goto="criar">➕ Criar anúncio</button>
         <span class="muted small" id="prod-count"></span>
       </div>
+      <div id="prod-cat-bar" class="prod-cat-bar hidden"></div>
 
       <div class="bulk-bar" id="prod-bulk-bar">
         <label class="bulk-checkall">
@@ -158,6 +162,44 @@
       </div>
 
       <div class="prod-list scroll-list" id="prod-list"></div>
+    </section>
+
+    <section class="screen hidden" data-screen="catalogo">
+      <div class="screen-head">
+        <h1>Catálogo</h1>
+        <p class="muted">Quem está ganhando os seus catálogos, o preço para ganhar e a pesquisa de qualquer outro catálogo do Mercado Livre</p>
+      </div>
+      <div class="cat-tabs">
+        <div class="an-seg" role="group" aria-label="Catálogo">
+          <button class="an-seg-btn active" data-cat-tab="mine">Meus catálogos</button>
+          <button class="an-seg-btn" data-cat-tab="search">Pesquisar catálogo</button>
+        </div>
+      </div>
+      <div id="catm" class="cat-pane">
+        <div class="toolbar">
+          <input class="search" id="catm-search" placeholder="🔍 Buscar nos seus catálogos…">
+          <select id="catm-filter">
+            <option value="all">Todos</option>
+            <option value="competing">Perdendo o 1º lugar</option>
+            <option value="winning">Ganhando</option>
+            <option value="sharing_first_place">Dividindo o 1º lugar</option>
+            <option value="listed">Fora da disputa</option>
+          </select>
+          <button class="btn dark" id="btn-catm-refresh">↻ Atualizar</button>
+          <span class="muted small" id="catm-count"></span>
+        </div>
+        <div id="catm-summary" class="catm-summary"></div>
+        <div id="catm-list" class="catm-list scroll-list"></div>
+      </div>
+      <div id="cats" class="cat-pane hidden">
+        <div class="toolbar cats-bar">
+          <input class="search" id="cats-q" placeholder="Cole o link do produto ou do anúncio, ou digite o nome do produto">
+          <button class="btn blue" id="btn-cats-go">Pesquisar</button>
+        </div>
+        <div class="muted small cats-tip">Na página do produto no Mercado Livre, copie o endereço (ele tem <code>/p/MLB…</code>). O link de um anúncio que está em catálogo também serve.</div>
+        <div id="cats-results" class="cats-results"></div>
+        <div id="catd" class="catd"></div>
+      </div>
     </section>
 
     <section class="screen hidden" data-screen="criar" id="cr-root">
@@ -412,6 +454,10 @@
         <button class="btn dark" id="btn-load-inbox">↻ Atualizar</button>
         <span class="muted small" id="inbox-count"></span>
       </div>
+      <div class="block q-block" id="q-block">
+        <div class="block-head"><h2>❓ Perguntas dos anúncios sem resposta</h2><button class="btn ghost sm" id="btn-q-load">↻ Atualizar</button></div>
+        <div id="q-list" class="q-list"><div class="muted small">Carregando…</div></div>
+      </div>
       <div id="inbox-suggestions-bar"></div>
       <div class="inbox-layout">
         <div class="inbox-list scroll-list" id="inbox-list"></div>
@@ -469,6 +515,20 @@
             <button class="btn ghost sm" id="btn-an-csv" title="Pedidos do período (com o filtro aplicado)">⬇ CSV</button>
           </div>
         </div>
+        <div class="an-filter-row">
+          <select id="an-lt" aria-label="Formato do anúncio"></select>
+          <select id="an-item" aria-label="Anúncio"></select>
+          <select id="an-pay" aria-label="Forma de pagamento"></select>
+        </div>
+        <div class="an-rules" role="group" aria-label="O que tirar do faturamento">
+          <span class="an-rules-label">No faturamento, tirar:</span>
+          <label class="an-chip"><input type="checkbox" data-an-rule="refund"> Devolvidos ou estornados</label>
+          <label class="an-chip"><input type="checkbox" data-an-rule="claim"> Reclamação aberta ou perdida</label>
+          <label class="an-chip"><input type="checkbox" data-an-rule="chargeback"> Contestação no cartão</label>
+          <label class="an-chip"><input type="checkbox" data-an-rule="fraud"> Risco de fraude</label>
+          <label class="an-chip" title="Só pedidos com envio: entram quando o Mercado Livre marcar como entregues"><input type="checkbox" data-an-rule="transit"> Ainda não entregues</label>
+          <span class="muted small">Cancelados e não pagos nunca entram.</span>
+        </div>
         <div class="an-statusline">
           <span id="an-status" class="muted small" aria-live="polite"></span>
           <span class="an-filterline"><span id="an-filter-label" class="small"></span>
@@ -480,6 +540,7 @@
         <div id="an-empty" class="block muted small">Escolha um período para ver a análise. Os pedidos vêm direto do Mercado Livre — nada é gravado no Worker.</div>
         <div id="an-results" class="hidden">
           <div id="an-kpis" class="an-kpis"></div>
+          <p id="an-out" class="small an-out"></p>
           <p id="an-kpi-note" class="muted small an-note"></p>
 
           <div class="block">
@@ -804,6 +865,14 @@
           <button class="btn dark" id="btn-tg-test">🔔 Enviar teste</button>
           <button class="btn ghost" id="btn-tg-off">Desconectar</button>
         </div>
+        <div class="ai-row tg-twoway-row">
+          <label class="switch-row">
+            <input type="checkbox" id="tg-twoway">
+            <span><strong>Responder pelo Telegram (mão dupla)</strong> — perguntas e mensagens que a IA não resolveu chegam com botões; você <em>responde a mensagem</em> no Telegram e o sistema envia no Mercado Livre. Também recebe recibos e alertas de catálogo com botões.</span>
+          </label>
+          <div class="muted small" id="tg-twoway-status"></div>
+          <div class="muted small" style="margin-top:6px">Comandos do bot: <code>/status</code> · <code>/catalogo</code> · <code>/recibo NÚMERO</code> · <code>/pausar</code> · <code>/ativar</code> · <code>/ajuda</code></div>
+        </div>
         <div id="tg-alerts" style="margin-top:14px"></div>
         <button class="btn green" id="btn-tg-save" style="margin-top:10px">Salvar alertas</button>
         <div class="muted small" id="tg-backup-info" style="margin-top:10px"></div>
@@ -834,7 +903,19 @@
         <div class="ai-row">
           <label class="switch-row">
             <input type="checkbox" id="ai-autoreply">
-            <span><strong>Resposta automática</strong> — IA responde sozinha perguntas simples e seguras (as demais viram sugestão)</span>
+            <span><strong>Resposta automática no chat</strong> — IA responde sozinha mensagens simples e seguras dos compradores (as demais viram sugestão)</span>
+          </label>
+        </div>
+        <div class="ai-row">
+          <label class="switch-row">
+            <input type="checkbox" id="ai-q-enabled">
+            <span><strong>Perguntas dos anúncios (antes da compra)</strong> — a IA também lê as perguntas feitas nos seus anúncios, com o título, a descrição e a garantia do anúncio</span>
+          </label>
+        </div>
+        <div class="ai-row">
+          <label class="switch-row">
+            <input type="checkbox" id="ai-q-auto">
+            <span><strong>Publicar sozinha as respostas seguras</strong> — o que não estiver na sua base vai para o Telegram com a sugestão, para você aprovar ou responder</span>
           </label>
         </div>
 
@@ -880,7 +961,7 @@
         <div style="margin-top:14px">
           <label class="muted small">Regras para a IA (o que ela pode/não pode fazer)</label>
           <textarea id="ai-rules" rows="4" style="width:100%;margin-top:4px"
-            placeholder="Ex: Nunca prometa reembolso. Se perguntarem de nota fiscal, diga que enviamos por email. Se for reclamação ou defeito, não responda — apenas sinalize para o vendedor."></textarea>
+            placeholder="Ex: Nunca prometa reembolso. O envio é imediato pelo chat após a compra. Se for reclamação ou defeito, não responda — apenas sinalize para o vendedor."></textarea>
         </div>
 
         <div style="margin-top:14px">
@@ -899,10 +980,80 @@
         <div id="ai-agent-box" class="hidden" style="margin-top:14px">
           <div class="msg-vars">
             <div><strong>Agente local</strong> <span id="ai-agent-status" class="muted small"></span></div>
-            <div class="muted small" style="margin-top:6px">O agente roda no seu computador e busca as perguntas aqui. Não precisa de túnel, porta aberta nem IP fixo — se o PC estiver desligado, as perguntas viram sugestões no Inbox.</div>
+            <div class="muted small" style="margin-top:6px">O agente roda no seu computador e busca as perguntas aqui. Não precisa de túnel, porta aberta nem IP fixo. Se o PC estiver desligado (ou não responder em 3 minutos), a pergunta vai para o seu Telegram e fica no painel.</div>
             <div class="muted small" style="margin-top:6px">Baixe o arquivo <code>ml-sender-agent.js</code>, preencha a chave secreta, instale o <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a> e rode <code>node ml-sender-agent.js</code>.</div>
           </div>
         </div>
+      </div>
+
+      <!-- Receipt -->
+      <div class="block" id="rc-block">
+        <div class="block-head"><h2>Recibo de venda (PDF)</h2></div>
+        <p class="muted small">Quando o comprador pede nota fiscal, recibo ou comprovante, o sistema gera o recibo com os dados da venda (comprador, CPF/CNPJ, endereço, valor por extenso) e envia no chat do pedido com uma mensagem padrão. Os dados do comprador são lidos do Mercado Livre na hora e não ficam guardados. <strong>O recibo não substitui a nota fiscal eletrônica (NF-e).</strong></p>
+        <div class="ai-row">
+          <label class="switch-row"><input type="checkbox" id="rc-enabled"><span><strong>Ativar recibos</strong> — botão nos Pedidos, nas Conversas e no Telegram</span></label>
+          <label class="switch-row"><input type="checkbox" id="rc-auto"><span><strong>Enviar sozinho quando o comprador pedir</strong> — no máximo 1 a cada 10 minutos e 3 por pedido; você é avisado no Telegram</span></label>
+        </div>
+        <div class="form-grid rc-grid" style="margin-top:10px">
+          <label>Seu nome completo ou razão social<input id="rc-name" maxlength="120" placeholder="Ex.: Maria da Silva"></label>
+          <label>CPF ou CNPJ<input id="rc-doc" maxlength="30" inputmode="numeric" placeholder="só números ou com pontos"></label>
+          <label>Cidade (vai antes da data, no fim)<input id="rc-city" maxlength="60" placeholder="Ex.: São Paulo"></label>
+          <label>Garantia quando o anúncio não informa<input id="rc-warranty" maxlength="60" placeholder="Ex.: 3 meses — vazio = não citar garantia"></label>
+        </div>
+        <div class="rc-sig-row">
+          <div class="rc-sig-box"><img id="rc-sig-img" alt="Assinatura" class="hidden"><span id="rc-sig-none" class="muted small">Sem imagem de assinatura — o PDF sai com uma linha para assinar à mão.</span></div>
+          <div class="toolbar" style="margin:8px 0 0">
+            <input type="file" id="rc-sig-file" accept="image/png,image/jpeg,image/webp" class="hidden">
+            <button class="btn dark sm" id="btn-rc-sig">✍ Enviar imagem da assinatura</button>
+            <button class="btn ghost sm" id="btn-rc-sig-del">Remover</button>
+            <label class="muted small rc-sigw">Tamanho no PDF <input type="range" id="rc-sigw" min="80" max="400" step="10"></label>
+          </div>
+          <div class="muted small">Foto ou print da sua assinatura (fundo branco). Ela fica guardada só na sua conta do sistema e não vai no backup.</div>
+        </div>
+        <div class="form-grid" style="margin-top:14px">
+          <label>Mensagem enviada junto com o PDF <span class="muted small" id="rc-message-count"></span><textarea id="rc-message" rows="3" maxlength="350"></textarea></label>
+          <label>Palavras que identificam o pedido de recibo (separe por vírgula)<textarea id="rc-keywords" rows="2" maxlength="600"></textarea></label>
+          <label>Título do documento<input id="rc-title" maxlength="80"></label>
+          <label>Texto do recibo<textarea id="rc-body" rows="16" class="rc-mono" maxlength="6000"></textarea></label>
+          <div class="rc-vars" id="rc-vars"></div>
+          <details class="rc-help"><summary>Como o modelo funciona</summary>
+            <ul class="muted small">
+              <li><code>{variavel}</code> vira o dado da venda — clique nas variáveis acima para inserir no texto.</li>
+              <li><code>**texto**</code> sai em <strong>negrito</strong>.</li>
+              <li><code>[ ... ]</code> é um trecho opcional: some quando alguma variável dentro dele está vazia (ex.: <code>[, CNPJ {doc_comprador}]</code>).</li>
+              <li>Linha com variável vazia fora de <code>[ ]</code> some; o parágrafo some quando todas as linhas com variáveis sumirem (ex.: endereço em produto digital).</li>
+              <li>Um parágrafo que termina com <code>:</code> some junto com o parágrafo seguinte.</li>
+              <li>Parágrafos são separados por uma linha em branco.</li>
+            </ul>
+          </details>
+          <label>Bloco da assinatura (abaixo da imagem)<textarea id="rc-signer" rows="2" maxlength="300"></textarea></label>
+          <label>Nome do arquivo<input id="rc-file" maxlength="80"></label>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button class="btn green" id="btn-rc-save">Salvar recibo</button>
+          <button class="btn dark" id="btn-rc-preview">👁 Ver exemplo (PDF)</button>
+          <button class="btn ghost" id="btn-rc-reset">Restaurar modelo padrão</button>
+        </div>
+        <div class="toolbar rc-test">
+          <input id="rc-test-order" inputmode="numeric" placeholder="Nº de um pedido seu">
+          <button class="btn dark sm" id="btn-rc-test-pdf">Ver PDF desse pedido</button>
+          <button class="btn ghost sm" id="btn-rc-test-send">Enviar ao comprador</button>
+        </div>
+        <div id="rc-result" class="muted small"></div>
+      </div>
+
+      <!-- Catalog -->
+      <div class="block" id="cat-block">
+        <div class="block-head"><h2>Catálogo — preço para ganhar</h2></div>
+        <p class="muted small">Nos anúncios de catálogo, o Mercado Livre informa quem está em 1º lugar e o preço que faria você ganhar. Veja em <strong>Produtos</strong> (filtro "Catálogo") e defina em cada anúncio o seu <strong>preço mínimo</strong>. O ajuste automático só baixa o preço até o necessário para ganhar — nunca abaixo do mínimo.</p>
+        <label class="switch-row"><input type="checkbox" id="cat-alert"><span><strong>Avisar no Telegram</strong> quando perder o 1º lugar (com botão para aplicar o preço)</span></label>
+        <label class="switch-row"><input type="checkbox" id="cat-auto"><span><strong>Ajustar o preço sozinho</strong> — só nos anúncios com preço mínimo e "automático" ligados</span></label>
+        <div class="form-grid cat-grid" style="margin-top:8px">
+          <label>Intervalo mínimo entre ajustes do mesmo anúncio (minutos)<input type="number" id="cat-cooldown" min="10" max="1440"></label>
+          <label>Queda máxima por ajuste (%) — acima disso, pergunta no Telegram<input type="number" id="cat-maxdrop" min="1" max="50" step="0.5"></label>
+        </div>
+        <div class="toolbar" style="margin-top:10px"><button class="btn green" id="btn-cat-save">Salvar catálogo</button></div>
+        <div class="muted small">Para os avisos chegarem na hora, na sua aplicação do Mercado Livre (DevCenter → Notificações) marque os tópicos <code>questions</code> e <code>catalog_item_competition_status</code>. Sem isso, o sistema confere sozinho 2× por hora.</div>
       </div>
 
       <!-- Health -->
@@ -1023,6 +1174,6 @@
   </div>
 </div>
 
-<script src="app.js?v=6291"></script>
+<script src="app.js?v=6310"></script>
 </body>
 </html>
